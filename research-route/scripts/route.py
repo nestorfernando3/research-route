@@ -404,11 +404,17 @@ def _read_regular_text_at(directory_fd: int, name: str) -> str:
 
 
 def _parse_frontmatter_at(
-    directory_fd: int, name: str
+    directory_fd: int, name: str, source: Path | None = None
 ) -> tuple[dict[str, object], str]:
+    text = _read_regular_text_at(directory_fd, name)
     return _parse_frontmatter_text(
-        _read_regular_text_at(directory_fd, name), Path(name)
+        text, source or Path(name)
     )
+
+
+def _require_file_at(root_fd: int, root: Path, name: str) -> None:
+    if not stat.S_ISREG(_relative_kind_at(root_fd, name) or 0):
+        raise ValueError(f"missing {name} in {root}")
 
 
 def _write_frontmatter_at(
@@ -450,10 +456,10 @@ def _relative_kind_at(root_fd: int, relative_path: str) -> int | None:
 
 
 def _markdown_files_at(
-    directory_fd: int, prefix: str = ""
+    directory_fd: int, prefix: str = "", skip_root: frozenset[str] = frozenset()
 ) -> Iterator[tuple[str, str]]:
     for name in sorted(os.listdir(directory_fd)):
-        if not prefix and name == ".research-route":
+        if not prefix and (name == ".research-route" or name in skip_root):
             continue
         info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         relative_path = f"{prefix}/{name}" if prefix else name
@@ -537,6 +543,7 @@ def new_work_item(
     with _state_directory_fd(root, create=True) as (root_fd, state_fd):
         assert state_fd is not None
         with _claim_guard(state_fd):
+            _require_file_at(root_fd, root, "ROUTE.md")
             _parse_frontmatter_at(root_fd, "ROUTE.md")
             with _directory_at(root_fd, "work-items") as work_items_fd:
                 assert work_items_fd is not None
@@ -577,15 +584,19 @@ def claim_item(root: Path, item_id: str, owner: str) -> Path:
         assert state_fd is not None
         with _claim_guard(state_fd):
             with _directory_at(state_fd, "claims", create=True) as claims_fd:
+                _require_file_at(root_fd, root, "ROUTE.md")
                 _parse_frontmatter_at(root_fd, "ROUTE.md")
                 with _directory_at(root_fd, "work-items") as work_items_fd:
                     assert work_items_fd is not None
                     item_name = _item_name_at(work_items_fd, item_id)
-                    item, _ = _parse_frontmatter_at(work_items_fd, item_name)
+                    item_path = root / "work-items" / item_name
+                    item, _ = _parse_frontmatter_at(
+                        work_items_fd, item_name, item_path
+                    )
                     record_errors = _work_item_record_errors(item)
                     if record_errors:
                         raise ValueError(
-                            f"invalid work item {item_name}: {record_errors[0][1]}"
+                            f"invalid work item {item_path}: {record_errors[0][1]}"
                         )
                     if item.get("status") != "open":
                         raise ValueError(f"work item is not open: {item_id}")
@@ -595,13 +606,14 @@ def claim_item(root: Path, item_id: str, owner: str) -> Path:
                     for dependency in dependencies:
                         assert isinstance(dependency, str)
                         dependency_name = _item_name_at(work_items_fd, dependency)
+                        dependency_path = root / "work-items" / dependency_name
                         dependency_item, _ = _parse_frontmatter_at(
-                            work_items_fd, dependency_name
+                            work_items_fd, dependency_name, dependency_path
                         )
                         dependency_errors = _work_item_record_errors(dependency_item)
                         if dependency_errors:
                             raise ValueError(
-                                f"invalid work item {dependency_name}: "
+                                f"invalid work item {dependency_path}: "
                                 f"{dependency_errors[0][1]}"
                             )
                         if dependency_item.get("status") != "closed":
@@ -632,6 +644,7 @@ def release_item(
     with _state_directory_fd(root) as (root_fd, state_fd):
         assert state_fd is not None
         with _claim_guard(state_fd):
+            _require_file_at(root_fd, root, "ROUTE.md")
             _parse_frontmatter_at(root_fd, "ROUTE.md")
             with _directory_at(state_fd, "claims") as claims_fd:
                 try:
@@ -907,7 +920,10 @@ def _reference_label(label: str) -> str:
 
 
 def _broken_markdown_target(
-    root_fd: int, relative_path: str, destination: str
+    root_fd: int,
+    work_items_fd: int | None,
+    relative_path: str,
+    destination: str,
 ) -> bool:
     lowered = destination.lower()
     if (
@@ -923,22 +939,33 @@ def _broken_markdown_target(
     target = posixpath.normpath(
         posixpath.join(posixpath.dirname(relative_path), target_text)
     )
-    return target == ".." or target.startswith("../") or _relative_kind_at(
-        root_fd, target
-    ) is None
+    if target == ".." or target.startswith("../"):
+        return True
+    if work_items_fd is not None and target == "work-items":
+        return False
+    if work_items_fd is not None and target.startswith("work-items/"):
+        return _relative_kind_at(work_items_fd, target.removeprefix("work-items/")) is None
+    return _relative_kind_at(root_fd, target) is None
 
 
 def _validate_markdown_links(
-    root_fd: int, issues: list[ValidationIssue]
+    root_fd: int, issues: list[ValidationIssue], work_items_fd: int | None
 ) -> None:
-    for relative_path, text in _markdown_files_at(root_fd):
+    markdown_files = _markdown_files_at(root_fd, skip_root=frozenset({"work-items"}))
+    if work_items_fd is not None:
+        markdown_files = iter(
+            (*markdown_files, *_markdown_files_at(work_items_fd, "work-items"))
+        )
+    for relative_path, text in markdown_files:
         for match in MARKDOWN_LINK.finditer(text):
             destination = match.group(1).strip()
             if destination.startswith("<") and ">" in destination:
                 destination = destination[1 : destination.index(">")]
             else:
                 destination = destination.split(maxsplit=1)[0]
-            if _broken_markdown_target(root_fd, relative_path, destination):
+            if _broken_markdown_target(
+                root_fd, work_items_fd, relative_path, destination
+            ):
                 issues.append(
                     ValidationIssue(
                         "broken-link",
@@ -969,7 +996,9 @@ def _validate_markdown_links(
                         f"reference definition does not exist: {label}",
                     )
                 )
-            elif _broken_markdown_target(root_fd, relative_path, destination):
+            elif _broken_markdown_target(
+                root_fd, work_items_fd, relative_path, destination
+            ):
                 issues.append(
                     ValidationIssue(
                         "broken-link",
@@ -1092,6 +1121,22 @@ def validate_route(root: Path) -> list[ValidationIssue]:
 def _validate_route_at(
     root: Path, root_fd: int, state_fd: int | None
 ) -> list[ValidationIssue]:
+    try:
+        work_items_fd = os.open("work-items", DIRECTORY_FLAGS, dir_fd=root_fd)
+    except OSError:
+        return _validate_route_contents_at(root, root_fd, state_fd, None)
+    try:
+        return _validate_route_contents_at(root, root_fd, state_fd, work_items_fd)
+    finally:
+        os.close(work_items_fd)
+
+
+def _validate_route_contents_at(
+    root: Path,
+    root_fd: int,
+    state_fd: int | None,
+    work_items_fd: int | None,
+) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
 
     for relative_path in REQUIRED_FILES:
@@ -1102,7 +1147,12 @@ def _validate_route_at(
                 )
             )
     for relative_path in REQUIRED_DIRECTORIES:
-        if not stat.S_ISDIR(_relative_kind_at(root_fd, relative_path) or 0):
+        exists = (
+            work_items_fd is not None
+            if relative_path == "work-items"
+            else stat.S_ISDIR(_relative_kind_at(root_fd, relative_path) or 0)
+        )
+        if not exists:
             issues.append(
                 ValidationIssue(
                     "missing-path", relative_path, "required directory is missing"
@@ -1176,53 +1226,53 @@ def _validate_route_at(
     items_by_id: dict[str, list[Path]] = {}
     item_records_by_id: dict[str, list[dict[str, object]]] = {}
     dependencies_by_id: dict[str, list[str]] = {}
-    if stat.S_ISDIR(_relative_kind_at(root_fd, "work-items") or 0):
-        with _directory_at(root_fd, "work-items") as work_items_fd:
-            assert work_items_fd is not None
-            for name in sorted(
-                entry for entry in os.listdir(work_items_fd) if entry.endswith(".md")
+    if work_items_fd is not None:
+        for name in sorted(
+            entry for entry in os.listdir(work_items_fd) if entry.endswith(".md")
+        ):
+            relative_path = f"work-items/{name}"
+            if not stat.S_ISREG(
+                os.stat(name, dir_fd=work_items_fd, follow_symlinks=False).st_mode
             ):
-                relative_path = f"work-items/{name}"
-                if not stat.S_ISREG(
-                    os.stat(name, dir_fd=work_items_fd, follow_symlinks=False).st_mode
-                ):
-                    continue
-                try:
-                    metadata, body = _parse_frontmatter_at(work_items_fd, name)
-                except (OSError, UnicodeError, ValueError) as error:
-                    issues.append(
-                        ValidationIssue("invalid-frontmatter", relative_path, str(error))
-                    )
-                    continue
-                record_errors = _work_item_record_errors(metadata)
-                issues.extend(
-                    ValidationIssue(code, relative_path, message)
-                    for code, message in record_errors
+                continue
+            try:
+                metadata, body = _parse_frontmatter_at(
+                    work_items_fd, name, root / relative_path
                 )
-                issues.extend(
-                    ValidationIssue(code, relative_path, message)
-                    for code, message in _work_item_section_errors(body)
+            except (OSError, UnicodeError, ValueError) as error:
+                issues.append(
+                    ValidationIssue("invalid-frontmatter", relative_path, str(error))
                 )
-                item_id = metadata.get("id")
-                if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
-                    continue
-                path = Path(relative_path)
-                items_by_id.setdefault(item_id, []).append(path)
-                item_records_by_id.setdefault(item_id, []).append(metadata)
-                if not name.startswith(f"{item_id}-"):
-                    issues.append(
-                        ValidationIssue(
-                            "item-id-mismatch",
-                            relative_path,
-                            f"filename does not match work-item id {item_id}",
-                        )
+                continue
+            record_errors = _work_item_record_errors(metadata)
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in record_errors
+            )
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in _work_item_section_errors(body)
+            )
+            item_id = metadata.get("id")
+            if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+                continue
+            path = Path(relative_path)
+            items_by_id.setdefault(item_id, []).append(path)
+            item_records_by_id.setdefault(item_id, []).append(metadata)
+            if not name.startswith(f"{item_id}-"):
+                issues.append(
+                    ValidationIssue(
+                        "item-id-mismatch",
+                        relative_path,
+                        f"filename does not match work-item id {item_id}",
                     )
-                dependencies = metadata.get("depends_on")
-                if isinstance(dependencies, list) and all(
-                    isinstance(dependency, str) and ITEM_ID.fullmatch(dependency)
-                    for dependency in dependencies
-                ):
-                    dependencies_by_id.setdefault(item_id, []).extend(dependencies)
+                )
+            dependencies = metadata.get("depends_on")
+            if isinstance(dependencies, list) and all(
+                isinstance(dependency, str) and ITEM_ID.fullmatch(dependency)
+                for dependency in dependencies
+            ):
+                dependencies_by_id.setdefault(item_id, []).extend(dependencies)
 
     issues.extend(_duplicate_item_issues(root, items_by_id))
     known_ids = set(items_by_id)
@@ -1269,7 +1319,9 @@ def _validate_route_at(
                         relative_path = f".research-route/claims/{name}"
                         filename_id = name.removesuffix(".lock")
                         try:
-                            claim = json.loads(_read_regular_text_at(claims_fd, name))
+                            claim = json.loads(
+                                _read_regular_text_at(claims_fd, name)
+                            )
                         except (ValueError, UnicodeError, json.JSONDecodeError) as error:
                             issues.append(
                                 ValidationIssue("invalid-claim", relative_path, str(error))
@@ -1307,7 +1359,7 @@ def _validate_route_at(
         handoff_issue = _handoff_freshness_issue(root_fd)
         if handoff_issue is not None:
             issues.append(handoff_issue)
-    _validate_markdown_links(root_fd, issues)
+    _validate_markdown_links(root_fd, issues, work_items_fd)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
 
@@ -1340,7 +1392,9 @@ def init_route(destination: Path, title: str, language: str) -> Path:
 
 
 def _scaffold_handoff_locked(root: Path, root_fd: int, state_fd: int) -> Path:
+    _require_file_at(root_fd, root, "ROUTE.md")
     metadata, route_body, route_signature = _read_route_snapshot(root_fd)
+    _require_file_at(root_fd, root, "HANDOFF.md")
     original = _read_regular_text_at(root_fd, "HANDOFF.md").encode("utf-8")
     if original.count(HANDOFF_BEGIN) != 1 or original.count(HANDOFF_END) != 1:
         raise ValueError("HANDOFF.md must contain exactly one mechanical marker pair")
@@ -1354,14 +1408,17 @@ def _scaffold_handoff_locked(root: Path, root_fd: int, state_fd: int) -> Path:
         for name in sorted(
             entry for entry in os.listdir(work_items_fd) if entry.endswith(".md")
         ):
+            item_path = root / "work-items" / name
             try:
-                item_metadata, _ = _parse_frontmatter_at(work_items_fd, name)
+                item_metadata, _ = _parse_frontmatter_at(
+                    work_items_fd, name, item_path
+                )
             except ValueError as error:
-                raise ValueError(f"invalid work item work-items/{name}: {error}") from None
+                raise ValueError(f"invalid work item {item_path}: {error}") from None
             record_errors = _work_item_record_errors(item_metadata)
             if record_errors:
                 raise ValueError(
-                    f"invalid work item work-items/{name}: {record_errors[0][1]}"
+                    f"invalid work item {item_path}: {record_errors[0][1]}"
                 )
             items.append(item_metadata)
             item_id = item_metadata["id"]
@@ -1386,7 +1443,7 @@ def _scaffold_handoff_locked(root: Path, root_fd: int, state_fd: int) -> Path:
             for name in sorted(
                 entry for entry in os.listdir(claims_fd) if entry.endswith(".lock")
             ):
-                path = Path(".research-route") / "claims" / name
+                path = root / ".research-route" / "claims" / name
                 claim = json.loads(_read_regular_text_at(claims_fd, name))
                 claim_errors = _claim_record_errors(claim)
                 if claim_errors:
@@ -1514,6 +1571,7 @@ def migrate_route(root: Path, target_version: int, apply: bool) -> MigrationPlan
     with _state_directory_fd(
         root, create=apply, missing_ok=not apply
     ) as (root_fd, state_fd):
+        _require_file_at(root_fd, root, "ROUTE.md")
         metadata, _ = _parse_frontmatter_at(root_fd, "ROUTE.md")
         current_version = metadata.get("schema_version")
         if type(current_version) is not int:

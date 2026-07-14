@@ -1221,6 +1221,39 @@ class RouteCliTests(unittest.TestCase):
                 claim = parked / "claims" / "rr-001.lock"
                 self.assertEqual(claim.exists(), operation != "release")
 
+    def test_validate_keeps_original_work_items_open_through_markdown_links(self):
+        self.init_project()
+        original = self.write_item("rr-001-original.md", "rr-001", [])
+        original.write_text(
+            original.read_text(encoding="utf-8")
+            + "\n[missing original](missing-original.md)\n",
+            encoding="utf-8",
+        )
+        parked = Path(self.temporary_directory.name) / "parked-work-items"
+        validate_links = ROUTE_CLI._validate_markdown_links
+
+        def swap_then_validate(root_fd, issues, *work_items_fd):
+            (self.project / "work-items").rename(parked)
+            swapped = self.project / "work-items"
+            swapped.mkdir()
+            (swapped / "rr-999-swapped.md").write_text(
+                "[missing swapped](missing-swapped.md)\n", encoding="utf-8"
+            )
+            self.assertEqual(len(work_items_fd), 1)
+            return validate_links(root_fd, issues, work_items_fd[0])
+
+        with mock.patch.object(
+            ROUTE_CLI, "_validate_markdown_links", side_effect=swap_then_validate
+        ):
+            issues = ROUTE_CLI.validate_route(self.project)
+
+        broken_paths = {issue.path for issue in issues if issue.code == "broken-link"}
+        self.assertIn("work-items/rr-001-original.md", broken_paths)
+        self.assertNotIn("work-items/rr-999-swapped.md", broken_paths)
+        self.assertNotIn(
+            "work-items", {issue.path for issue in issues if issue.code == "missing-path"}
+        )
+
     def test_state_symlink_is_rejected_by_validate_handoff_and_claim(self):
         self.init_project_with_item()
         external = Path(self.temporary_directory.name) / "external-state"
@@ -1238,6 +1271,51 @@ class RouteCliTests(unittest.TestCase):
 
         self.assertIn("invalid-claim", {issue.code for issue in issues})
         self.assertEqual(list((external / "claims").iterdir()), [])
+
+    def test_operations_preserve_missing_route_and_handoff_errors(self):
+        operations = (
+            lambda: ROUTE_CLI.new_work_item(
+                self.project, "Missing route", "source", "light", []
+            ),
+            lambda: ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a"),
+            lambda: ROUTE_CLI.release_item(self.project, "rr-001", "agent-a"),
+            lambda: ROUTE_CLI.scaffold_handoff(self.project),
+            lambda: ROUTE_CLI.migrate_route(self.project, 1, False),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                shutil.rmtree(self.project, ignore_errors=True)
+                self.init_project_with_item()
+                (self.project / "ROUTE.md").unlink()
+                with self.assertRaisesRegex(
+                    ValueError, rf"missing ROUTE\.md in {re.escape(str(self.project))}"
+                ):
+                    operation()
+
+        shutil.rmtree(self.project, ignore_errors=True)
+        self.init_project()
+        (self.project / "HANDOFF.md").unlink()
+        with self.assertRaisesRegex(
+            ValueError, rf"missing HANDOFF\.md in {re.escape(str(self.project))}"
+        ):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+    def test_handoff_diagnostics_keep_absolute_logical_item_and_claim_paths(self):
+        self.init_project()
+        item = self.project / "work-items" / "rr-001-bad.md"
+        item.write_text("not frontmatter\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, re.escape(str(item))):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        item.unlink()
+        claim = self.project / ".research-route" / "claims" / "rr-001.lock"
+        claim.parent.mkdir(parents=True)
+        claim.write_text(
+            json.dumps({"item_id": "rr-001", "owner": "agent-a"}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, re.escape(str(claim))):
+            ROUTE_CLI.scaffold_handoff(self.project)
 
     def test_validate_reports_missing_paths_and_malformed_frontmatter(self):
         self.init_project()
