@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Route"
+  short_description: "Build rigorous, original academic papers"
+  default_prompt: "Use $research-route to chart and advance a rigorous academic paper."
