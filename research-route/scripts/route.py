@@ -896,6 +896,7 @@ def scaffold_handoff(root: Path) -> Path:
     if duplicate_issues:
         raise ValueError(f"ambiguous work items: {duplicate_issues[0].message}")
     known_ids = set(items_by_id)
+    statuses = {item.get("id"): item.get("status") for item in items}
     active_claims: list[str] = []
     claimed_next_actions: list[str] = []
     claimed_ids: set[object] = set()
@@ -921,12 +922,15 @@ def scaffold_handoff(root: Path) -> Path:
                 f"- {claim.get('item_id')}: {claim.get('owner')}"
             )
             item = next(item for item in items if item.get("id") == claim.get("item_id"))
-            claimed_next_actions.append(
-                f"- Continue {claim.get('item_id')}: {item.get('title')} "
-                f"(owner: {claim.get('owner')})"
-            )
+            if item.get("status") == "open" and all(
+                statuses.get(dependency) == "closed"
+                for dependency in item.get("depends_on", [])
+            ):
+                claimed_next_actions.append(
+                    f"- Continue {claim.get('item_id')}: {item.get('title')} "
+                    f"(owner: {claim.get('owner')})"
+                )
 
-    statuses = {item.get("id"): item.get("status") for item in items}
     open_items = [
         f"- {item.get('id')}: {item.get('title')}"
         for item in items
@@ -947,15 +951,23 @@ def scaffold_handoff(root: Path) -> Path:
         r"(?ms)^## Blocks[ \t]*\r?\n(.*?)(?=^## |\Z)", route_body
     )
     blocks = blocks_match.group(1).strip() if blocks_match else ""
-    next_action = (
-        claimed_next_actions[0]
-        if claimed_next_actions
-        else (
-            open_items[0].replace("- ", "- Start ", 1)
-            if open_items
-            else "- Ask the researcher to define the next work item."
-        )
+    exact_action_match = re.search(
+        r"(?ms)^## Exact next action[ \t]*\r?\n(.*?)(?=^## |\Z)", route_body
     )
+    exact_action = exact_action_match.group(1).strip() if exact_action_match else ""
+    if exact_action and exact_action.lower() not in {"none", "- none"}:
+        next_action = exact_action
+    elif blocks and blocks.lower() not in {"none", "- none"}:
+        next_action = (
+            "- Resolve the blocking conditions recorded in ROUTE.md before "
+            "continuing work."
+        )
+    elif claimed_next_actions:
+        next_action = claimed_next_actions[0]
+    elif open_items:
+        next_action = open_items[0].replace("- ", "- Start ", 1)
+    else:
+        next_action = "- Ask the researcher to define the next work item."
     mechanical = (
         "\n\n"
         f"- Project: {metadata.get('project_title')}\n"

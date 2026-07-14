@@ -95,4 +95,6 @@ A fresh agent received only a clean temporary project path and the prescribed re
 
 After `handoff` was corrected to derive a deterministic next action from active claimed work, the clean-room test was repeated with a new project and a different fresh agent. The rerun identified the same bounded state and reported the exact action: continue `rr-001`, “Test the nearest rival,” owned by `agent-a`. It did not invent purpose, contribution, venue, rationale, decisions, or research content absent from the files.
 
+A final fresh-agent restart and precedence regression confirmed that a non-empty canonical `ROUTE.md` exact action survives regeneration even when work is claimed. The agent reported “Test the nearest rival,” distinguished it from the active `rr-001` claim, and did not invent the unspecified rival, method, or rationale. Substantive blocks instead produce an instruction to resolve the recorded block, while safe ready work and an empty frontier retain their deterministic fallbacks.
+
 Outcome: **PASS**.

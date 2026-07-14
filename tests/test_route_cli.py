@@ -1123,6 +1123,60 @@ class RouteCliTests(unittest.TestCase):
             handoff,
         )
 
+    def test_handoff_prefers_canonical_exact_next_action_over_claim(self):
+        self.init_project_with_item()
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        body = body.replace(
+            "## Exact next action\n",
+            "## Exact next action\n\nAsk the researcher to approve the thesis.\n",
+        )
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "### Exact next action\n\nAsk the researcher to approve the thesis.",
+            handoff,
+        )
+
+    def test_handoff_resolves_substantive_block_before_claimed_work(self):
+        self.init_project_with_item()
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        body = body.replace("## Blocks\n", "## Blocks\n\nArchive access delayed.\n")
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+        action = handoff.split("### Exact next action\n\n", 1)[1].split(
+            "\n\n<!-- END ROUTE MECHANICAL -->", 1
+        )[0]
+
+        self.assertIn("Resolve the blocking conditions recorded in ROUTE.md", action)
+        self.assertNotIn("Continue rr-001", action)
+
+    def test_handoff_starts_ready_unclaimed_work_when_safe(self):
+        self.init_project_with_item()
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "### Exact next action\n\n- Start rr-001: Map rival accounts",
+            handoff,
+        )
+
+    def test_handoff_uses_honest_fallback_when_frontier_is_empty(self):
+        self.init_project()
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "### Exact next action\n\n- Ask the researcher to define the next work item.",
+            handoff,
+        )
+
     def test_handoff_refuses_broken_claims_symlink_without_modifying_prose(self):
         self.init_project()
         state = self.project / ".research-route"
