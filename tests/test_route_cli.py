@@ -817,6 +817,40 @@ class RouteCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "timestamp"):
             ROUTE_CLI.release_item(self.project, "rr-001", "agent-a")
 
+    def test_validate_reports_unsafe_claims_directory_and_lock_symlink(self):
+        for index, kind in enumerate(("claims-directory", "claim-lock")):
+            with self.subTest(kind=kind):
+                project = Path(self.temporary_directory.name) / f"unsafe-claims-{index}"
+                result = self.run_cli(
+                    "init",
+                    str(project),
+                    "--title",
+                    "Unsafe claims",
+                    "--language",
+                    "en",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                state = project / ".research-route"
+                state.mkdir()
+                external = Path(self.temporary_directory.name) / f"external-{index}"
+                if kind == "claims-directory":
+                    external.mkdir()
+                    (state / "claims").symlink_to(external, target_is_directory=True)
+                else:
+                    claims = state / "claims"
+                    claims.mkdir()
+                    external.write_text("{}\n", encoding="utf-8")
+                    (claims / "rr-001.lock").symlink_to(external)
+
+                invalid = [
+                    issue
+                    for issue in ROUTE_CLI.validate_route(project)
+                    if issue.code == "invalid-claim"
+                ]
+
+                self.assertEqual(len(invalid), 1)
+                self.assertIn(".research-route/claims", invalid[0].path)
+
     def test_validate_detects_stale_handoff_without_precision_false_positive(self):
         self.init_project()
         route = self.project / "ROUTE.md"
@@ -843,6 +877,67 @@ class RouteCliTests(unittest.TestCase):
         self.assertIn(
             "stale-handoff", {issue.code for issue in ROUTE_CLI.validate_route(self.project)}
         )
+
+    def test_validate_reports_corrupt_nonempty_handoff_as_invalid(self):
+        corruptions = (
+            (
+                "missing-marker",
+                lambda text: text.replace(
+                    "<!-- END ROUTE MECHANICAL -->",
+                    "<!-- BROKEN ROUTE MECHANICAL -->",
+                ),
+            ),
+            (
+                "missing-timestamp",
+                lambda text: re.sub(
+                    r"(?m)^- ROUTE\.md modified: .+\n", "", text
+                ),
+            ),
+            (
+                "naive-timestamp",
+                lambda text: re.sub(
+                    r"(?m)^- ROUTE\.md modified: .+$",
+                    "- ROUTE.md modified: 2026-07-13T12:00:00",
+                    text,
+                ),
+            ),
+        )
+        for index, (name, corrupt) in enumerate(corruptions):
+            with self.subTest(name=name):
+                project = Path(self.temporary_directory.name) / f"handoff-{index}"
+                result = self.run_cli(
+                    "init", str(project), "--title", "Handoff", "--language", "en"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                handoff = ROUTE_CLI.scaffold_handoff(project)
+                handoff.write_text(
+                    corrupt(handoff.read_text(encoding="utf-8")),
+                    encoding="utf-8",
+                )
+
+                codes = {issue.code for issue in ROUTE_CLI.validate_route(project)}
+
+                self.assertIn("invalid-handoff", codes)
+                self.assertNotIn("stale-handoff", codes)
+
+    def test_handoff_refuses_route_mutation_before_write(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        handoff = self.project / "HANDOFF.md"
+        before = handoff.read_bytes()
+        original_check = ROUTE_CLI._route_snapshot_is_current
+
+        def mutate_then_check(path: Path, signature: tuple[int, ...]) -> bool:
+            path.write_bytes(path.read_bytes() + b"\n")
+            return original_check(path, signature)
+
+        with mock.patch.object(
+            ROUTE_CLI, "_route_snapshot_is_current", side_effect=mutate_then_check
+        ):
+            with self.assertRaisesRegex(ValueError, "changed while generating handoff"):
+                ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), before)
 
     def test_validate_reports_missing_paths_and_malformed_frontmatter(self):
         self.init_project()

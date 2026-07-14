@@ -153,11 +153,12 @@ def _parse_scalar(value: str) -> object:
     raise ValueError(f"unsupported frontmatter scalar: {value!r}")
 
 
-def parse_frontmatter(path: Path) -> tuple[dict[str, object], str]:
-    text = path.read_text(encoding="utf-8")
+def _parse_frontmatter_text(
+    text: str, source: Path
+) -> tuple[dict[str, object], str]:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "---":
-        raise ValueError(f"missing frontmatter in {path}")
+        raise ValueError(f"missing frontmatter in {source}")
 
     metadata: dict[str, object] = {}
     for index, line in enumerate(lines[1:], start=1):
@@ -172,7 +173,11 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, object], str]:
             raise ValueError(f"duplicate frontmatter key: {key}")
         metadata[key] = _parse_scalar(value[1:])
 
-    raise ValueError(f"unterminated frontmatter in {path}")
+    raise ValueError(f"unterminated frontmatter in {source}")
+
+
+def parse_frontmatter(path: Path) -> tuple[dict[str, object], str]:
+    return _parse_frontmatter_text(path.read_text(encoding="utf-8"), path)
 
 
 def _format_scalar(value: object) -> str:
@@ -225,6 +230,52 @@ def _require_route(root: Path) -> Path:
     if route.is_symlink() or not route.is_file():
         raise ValueError(f"missing ROUTE.md in {root}")
     return route
+
+
+def _stat_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _read_route_snapshot(
+    route: Path,
+) -> tuple[dict[str, object], str, tuple[int, int, int, int, int]]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(3):
+        before = route.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"invalid ROUTE.md: {route}")
+        descriptor = os.open(route, flags)
+        with os.fdopen(descriptor, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            content = stream.read()
+            after_read = os.fstat(stream.fileno())
+        after = route.lstat()
+        signature = _stat_signature(opened)
+        if (
+            signature == _stat_signature(before)
+            and signature == _stat_signature(after_read)
+            and signature == _stat_signature(after)
+        ):
+            text = content.decode("utf-8")
+            metadata, body = _parse_frontmatter_text(text, route)
+            return metadata, body, signature
+    raise ValueError("ROUTE.md changed while reading handoff state")
+
+
+def _route_snapshot_is_current(
+    route: Path, signature: tuple[int, int, int, int, int]
+) -> bool:
+    try:
+        current = route.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(current.st_mode) and _stat_signature(current) == signature
 
 
 def _slugify(title: str) -> str:
@@ -759,24 +810,37 @@ def _validate_markdown_links(
                 )
 
 
-def _stale_handoff_issue(root: Path, route: Path) -> ValidationIssue | None:
+def _handoff_freshness_issue(root: Path, route: Path) -> ValidationIssue | None:
     handoff = root / "HANDOFF.md"
     if handoff.is_symlink() or not handoff.is_file():
         return None
     try:
         content = handoff.read_bytes()
-        if content.count(HANDOFF_BEGIN) != 1 or content.count(HANDOFF_END) != 1:
-            return None
-        mechanical = content.split(HANDOFF_BEGIN, 1)[1].split(HANDOFF_END, 1)[0]
-        match = re.search(
-            rb"(?m)^- ROUTE\.md modified:[ \t]*(.+?)[ \t]*\r?$", mechanical
+    except OSError as error:
+        return ValidationIssue("invalid-handoff", "HANDOFF.md", str(error))
+    if (
+        content.count(HANDOFF_BEGIN) != 1
+        or content.count(HANDOFF_END) != 1
+        or content.index(HANDOFF_BEGIN) > content.index(HANDOFF_END)
+    ):
+        return ValidationIssue(
+            "invalid-handoff",
+            "HANDOFF.md",
+            "mechanical snapshot markers are missing, duplicated, or out of order",
         )
-        if match is None:
-            return None
-        snapshot_text = match.group(1).decode("utf-8")
-        snapshot = _parse_aware_timestamp(snapshot_text)
-    except (OSError, UnicodeError, ValueError):
+    mechanical = content.split(HANDOFF_BEGIN, 1)[1].split(HANDOFF_END, 1)[0]
+    if not mechanical.strip():
         return None
+    matches = re.findall(
+        rb"(?m)^- ROUTE\.md modified:[ \t]*(.+?)[ \t]*\r?$", mechanical
+    )
+    try:
+        if len(matches) != 1:
+            raise ValueError("missing or duplicate ROUTE.md modified timestamp")
+        snapshot_text = matches[0].decode("utf-8")
+        snapshot = _parse_aware_timestamp(snapshot_text)
+    except (UnicodeError, ValueError) as error:
+        return ValidationIssue("invalid-handoff", "HANDOFF.md", str(error))
     fraction = re.search(r"T\d{2}:\d{2}:\d{2}[.,](\d+)", snapshot_text)
     resolution = 10 ** -min(len(fraction.group(1)), 6) if fraction else 1.0
     current = datetime.fromtimestamp(route.stat().st_mtime, timezone.utc)
@@ -956,10 +1020,32 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 )
 
     claims = root / ".research-route" / "claims"
-    if claims.is_dir() and not claims.is_symlink():
+    claims_safe = not claims.is_symlink() and claims.is_dir()
+    if claims.is_symlink() or (claims.exists() and not claims_safe):
+        issues.append(
+            ValidationIssue(
+                "invalid-claim",
+                _relative_path(root, claims),
+                "claims path must be a regular, non-symlinked directory",
+            )
+        )
+    if claims_safe:
         for path in sorted(claims.glob("*.lock")):
             relative_path = _relative_path(root, path)
             filename_id = path.stem
+            try:
+                regular = not path.is_symlink() and stat.S_ISREG(path.lstat().st_mode)
+            except OSError:
+                regular = False
+            if not regular:
+                issues.append(
+                    ValidationIssue(
+                        "invalid-claim",
+                        relative_path,
+                        "claim lock must be a regular, non-symlinked file",
+                    )
+                )
+                continue
             try:
                 claim = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -987,9 +1073,9 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 for message in _claim_compatibility_errors(claim, unique_items)
             )
     if route_path.is_file() and not route_path.is_symlink():
-        stale_issue = _stale_handoff_issue(root, route_path)
-        if stale_issue is not None:
-            issues.append(stale_issue)
+        handoff_issue = _handoff_freshness_issue(root, route_path)
+        if handoff_issue is not None:
+            issues.append(handoff_issue)
     _validate_markdown_links(root, issues)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
@@ -1024,7 +1110,7 @@ def init_route(destination: Path, title: str, language: str) -> Path:
 
 def scaffold_handoff(root: Path) -> Path:
     route = _require_route(root)
-    metadata, route_body = parse_frontmatter(route)
+    metadata, route_body, route_signature = _read_route_snapshot(route)
     handoff = root / "HANDOFF.md"
     if handoff.is_symlink() or not handoff.is_file():
         raise ValueError(f"missing HANDOFF.md in {root}")
@@ -1068,8 +1154,8 @@ def scaffold_handoff(root: Path) -> Path:
     if claims.is_symlink() or claims.exists():
         _require_directory(claims)
         for path in sorted(claims.glob("*.lock")):
-            if path.is_symlink():
-                raise ValueError(f"symlinked claim is not allowed: {path}")
+            if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError(f"invalid claim lock: {path}")
             claim = json.loads(path.read_text(encoding="utf-8"))
             claim_errors = _claim_record_errors(claim)
             if claim_errors:
@@ -1114,7 +1200,7 @@ def scaffold_handoff(root: Path) -> Path:
 
     generated_at = datetime.now(timezone.utc).isoformat()
     route_modified = datetime.fromtimestamp(
-        route.stat().st_mtime, timezone.utc
+        route_signature[3] / 1_000_000_000, timezone.utc
     ).isoformat()
     blocks_match = re.search(
         r"(?ms)^## Blocks[ \t]*\r?\n(.*?)(?=^## |\Z)", route_body
@@ -1156,6 +1242,8 @@ def scaffold_handoff(root: Path) -> Path:
         + next_action
         + "\n\n"
     ).encode("utf-8")
+    if not _route_snapshot_is_current(route, route_signature):
+        raise ValueError("ROUTE.md changed while generating handoff")
     _atomic_write_bytes(
         handoff, prefix + HANDOFF_BEGIN + mechanical + HANDOFF_END + suffix
     )
