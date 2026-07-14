@@ -88,3 +88,11 @@ Overall: **GREEN 4, baseline 2, ties 0**. The evaluator was blinded to which out
 - In simple evidence-access and terminology repairs, the full portable-state recipe can add overhead even when the substantive decision is correct; concise responses should lead with the decision and keep state updates compact.
 - No live manuscript, source full text, named fallback venue, or external project root was supplied, so this evaluation tests decision shape and proposed persistence rather than successful integration into an existing project.
 - Behavioral evaluation uses one fresh agent per run and one final blinded evaluator; more repetitions would better estimate variance.
+
+## Cold-restart smoke test
+
+A fresh agent received only a clean temporary project path and the prescribed restart prompt. The first run correctly identified **Cold Restart Study**, schema v1, English, discovery cycle, active claim `rr-001` owned by `agent-a`, and no recorded blocks or substantive research. It also exposed a real defect: neither state file named an exact next action.
+
+After `handoff` was corrected to derive a deterministic next action from active claimed work, the clean-room test was repeated with a new project and a different fresh agent. The rerun identified the same bounded state and reported the exact action: continue `rr-001`, “Test the nearest rival,” owned by `agent-a`. It did not invent purpose, contribution, venue, rationale, decisions, or research content absent from the files.
+
+Outcome: **PASS**.

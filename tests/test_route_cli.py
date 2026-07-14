@@ -1112,6 +1112,17 @@ class RouteCliTests(unittest.TestCase):
         self.assertIn("rr-001: agent-a", handoff)
         self.assertIn("Archive access delayed.", handoff)
 
+    def test_handoff_names_claimed_work_as_exact_next_action(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "### Exact next action\n\n- Continue rr-001: Map rival accounts (owner: agent-a)",
+            handoff,
+        )
+
     def test_handoff_refuses_broken_claims_symlink_without_modifying_prose(self):
         self.init_project()
         state = self.project / ".research-route"

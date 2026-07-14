@@ -897,6 +897,7 @@ def scaffold_handoff(root: Path) -> Path:
         raise ValueError(f"ambiguous work items: {duplicate_issues[0].message}")
     known_ids = set(items_by_id)
     active_claims: list[str] = []
+    claimed_next_actions: list[str] = []
     claimed_ids: set[object] = set()
     claims = root / ".research-route" / "claims"
     if claims.is_symlink() or claims.exists():
@@ -918,6 +919,11 @@ def scaffold_handoff(root: Path) -> Path:
             claimed_ids.add(claim.get("item_id"))
             active_claims.append(
                 f"- {claim.get('item_id')}: {claim.get('owner')}"
+            )
+            item = next(item for item in items if item.get("id") == claim.get("item_id"))
+            claimed_next_actions.append(
+                f"- Continue {claim.get('item_id')}: {item.get('title')} "
+                f"(owner: {claim.get('owner')})"
             )
 
     statuses = {item.get("id"): item.get("status") for item in items}
@@ -941,6 +947,15 @@ def scaffold_handoff(root: Path) -> Path:
         r"(?ms)^## Blocks[ \t]*\r?\n(.*?)(?=^## |\Z)", route_body
     )
     blocks = blocks_match.group(1).strip() if blocks_match else ""
+    next_action = (
+        claimed_next_actions[0]
+        if claimed_next_actions
+        else (
+            open_items[0].replace("- ", "- Start ", 1)
+            if open_items
+            else "- Ask the researcher to define the next work item."
+        )
+    )
     mechanical = (
         "\n\n"
         f"- Project: {metadata.get('project_title')}\n"
@@ -956,6 +971,8 @@ def scaffold_handoff(root: Path) -> Path:
         + ("\n".join(active_claims) if active_claims else "- None")
         + "\n\n### Blocks\n\n"
         + (blocks if blocks else "- None")
+        + "\n\n### Exact next action\n\n"
+        + next_action
         + "\n\n"
     ).encode("utf-8")
     _atomic_write_bytes(
