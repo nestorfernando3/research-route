@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -102,7 +102,11 @@ Migration = Callable[[Path, bool], tuple[str, ...]]
 MIGRATIONS: dict[tuple[int, int], Migration] = {}
 
 
-def _atomic_write_bytes(path: Path, content: bytes) -> None:
+def _atomic_write_bytes(
+    path: Path,
+    content: bytes,
+    pre_replace: Callable[[], bool] | None = None,
+) -> None:
     mode = stat.S_IMODE(path.stat().st_mode)
     temporary_path: Path | None = None
     try:
@@ -116,6 +120,8 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
             temporary_path = Path(temporary_file.name)
             temporary_file.write(content)
         temporary_path.chmod(mode)
+        if pre_replace is not None and not pre_replace():
+            raise ValueError("ROUTE.md changed while generating handoff")
         temporary_path.replace(path)
     finally:
         if temporary_path is not None and temporary_path.exists():
@@ -349,7 +355,9 @@ def _reserve_item_id(
     allocations = _require_directory(
         state_directory / "allocations", create=True
     )
-    with _exclusive_file_lock(state_directory / "allocation.lock"):
+    with _claim_guard(state_directory), _exclusive_file_lock(
+        state_directory / "allocation.lock"
+    ):
         route_metadata, route_body = parse_frontmatter(route)
         counter = route_metadata.get("next_work_item")
         if type(counter) is not int or counter < 1:
@@ -810,6 +818,43 @@ def _validate_markdown_links(
                 )
 
 
+def _parse_handoff_snapshot(mechanical: bytes) -> datetime:
+    text = mechanical.decode("utf-8")
+    match = re.fullmatch(
+        r"\n\n"
+        r"- Project: (?P<project>[^\r\n]+)\n"
+        r"- Schema version: (?P<schema>[0-9]+)\n"
+        r"- Current cycle: (?P<cycle>[^\r\n]+)\n"
+        r"- Target venue: (?P<target>[^\r\n]+)\n"
+        r"- Fallback venue: (?P<fallback>[^\r\n]+)\n"
+        r"- Generated at: (?P<generated>[^\r\n]+)\n"
+        r"- ROUTE\.md modified: (?P<modified>[^\r\n]+)\n\n"
+        r"### Open frontier candidates\n\n(?P<frontier>.+?)\n\n"
+        r"### Active claims\n\n(?P<claims>.+?)\n\n"
+        r"### Blocks\n\n(?P<blocks>.+?)\n\n"
+        r"### Exact next action\n\n(?P<action>.+?)\n\n",
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        raise ValueError("mechanical snapshot does not match the handoff schema")
+    if match.group("cycle") not in ALLOWED_CYCLES:
+        raise ValueError("invalid current cycle in mechanical snapshot")
+    for section in ("frontier", "claims"):
+        value = match.group(section)
+        if value != "- None" and any(
+            re.fullmatch(r"- rr-[0-9]{3,}: .+", line) is None
+            for line in value.splitlines()
+        ):
+            raise ValueError(f"invalid {section} entries in mechanical snapshot")
+    now = datetime.now(timezone.utc)
+    generated = _parse_aware_timestamp(match.group("generated"))
+    modified = _parse_aware_timestamp(match.group("modified"))
+    if generated > now + timedelta(minutes=5) or modified > now + timedelta(minutes=5):
+        raise ValueError("mechanical snapshot timestamp is in the future")
+    return modified
+
+
 def _handoff_freshness_issue(root: Path, route: Path) -> ValidationIssue | None:
     handoff = root / "HANDOFF.md"
     if handoff.is_symlink() or not handoff.is_file():
@@ -831,16 +876,11 @@ def _handoff_freshness_issue(root: Path, route: Path) -> ValidationIssue | None:
     mechanical = content.split(HANDOFF_BEGIN, 1)[1].split(HANDOFF_END, 1)[0]
     if not mechanical.strip():
         return None
-    matches = re.findall(
-        rb"(?m)^- ROUTE\.md modified:[ \t]*(.+?)[ \t]*\r?$", mechanical
-    )
     try:
-        if len(matches) != 1:
-            raise ValueError("missing or duplicate ROUTE.md modified timestamp")
-        snapshot_text = matches[0].decode("utf-8")
-        snapshot = _parse_aware_timestamp(snapshot_text)
+        snapshot = _parse_handoff_snapshot(mechanical)
     except (UnicodeError, ValueError) as error:
         return ValidationIssue("invalid-handoff", "HANDOFF.md", str(error))
+    snapshot_text = snapshot.isoformat()
     fraction = re.search(r"T\d{2}:\d{2}:\d{2}[.,](\d+)", snapshot_text)
     resolution = 10 ** -min(len(fraction.group(1)), 6) if fraction else 1.0
     current = datetime.fromtimestamp(route.stat().st_mtime, timezone.utc)
@@ -1019,9 +1059,19 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                     )
                 )
 
-    claims = root / ".research-route" / "claims"
-    claims_safe = not claims.is_symlink() and claims.is_dir()
-    if claims.is_symlink() or (claims.exists() and not claims_safe):
+    state = root / ".research-route"
+    state_safe = not state.is_symlink() and (not state.exists() or state.is_dir())
+    claims = state / "claims"
+    claims_safe = state_safe and not claims.is_symlink() and claims.is_dir()
+    if not state_safe:
+        issues.append(
+            ValidationIssue(
+                "invalid-claim",
+                _relative_path(root, state),
+                "state path must be a regular, non-symlinked directory",
+            )
+        )
+    elif claims.is_symlink() or (claims.exists() and not claims_safe):
         issues.append(
             ValidationIssue(
                 "invalid-claim",
@@ -1108,7 +1158,7 @@ def init_route(destination: Path, title: str, language: str) -> Path:
             shutil.rmtree(staging)
 
 
-def scaffold_handoff(root: Path) -> Path:
+def _scaffold_handoff_locked(root: Path) -> Path:
     route = _require_route(root)
     metadata, route_body, route_signature = _read_route_snapshot(route)
     handoff = root / "HANDOFF.md"
@@ -1245,9 +1295,18 @@ def scaffold_handoff(root: Path) -> Path:
     if not _route_snapshot_is_current(route, route_signature):
         raise ValueError("ROUTE.md changed while generating handoff")
     _atomic_write_bytes(
-        handoff, prefix + HANDOFF_BEGIN + mechanical + HANDOFF_END + suffix
+        handoff,
+        prefix + HANDOFF_BEGIN + mechanical + HANDOFF_END + suffix,
+        lambda: _route_snapshot_is_current(route, route_signature),
     )
     return handoff
+
+
+def scaffold_handoff(root: Path) -> Path:
+    _require_route(root)
+    state_directory = _require_directory(root / ".research-route", create=True)
+    with _claim_guard(state_directory):
+        return _scaffold_handoff_locked(root)
 
 
 def migrate_route(root: Path, target_version: int, apply: bool) -> MigrationPlan:

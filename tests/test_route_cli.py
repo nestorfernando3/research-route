@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
 import json
@@ -920,6 +920,39 @@ class RouteCliTests(unittest.TestCase):
                 self.assertIn("invalid-handoff", codes)
                 self.assertNotIn("stale-handoff", codes)
 
+    def test_validate_rejects_incomplete_duplicate_garbage_and_future_handoffs(self):
+        corruptions = (
+            lambda text: re.sub(r"(?m)^- Project: .+\n", "", text),
+            lambda text: text.replace(
+                "- Schema version: 1\n", "- Schema version: 1\n- Schema version: 1\n"
+            ),
+            lambda text: text.replace(
+                "### Active claims\n", "unexpected garbage\n\n### Active claims\n"
+            ),
+            lambda text: re.sub(
+                r"(?m)^- Generated at: .+$",
+                "- Generated at: "
+                + (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                text,
+            ),
+        )
+        for index, corrupt in enumerate(corruptions):
+            with self.subTest(index=index):
+                project = Path(self.temporary_directory.name) / f"schema-{index}"
+                result = self.run_cli(
+                    "init", str(project), "--title", "Handoff", "--language", "en"
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                handoff = ROUTE_CLI.scaffold_handoff(project)
+                handoff.write_text(
+                    corrupt(handoff.read_text(encoding="utf-8")), encoding="utf-8"
+                )
+
+                codes = {issue.code for issue in ROUTE_CLI.validate_route(project)}
+
+                self.assertIn("invalid-handoff", codes)
+                self.assertNotIn("stale-handoff", codes)
+
     def test_handoff_refuses_route_mutation_before_write(self):
         self.init_project()
         route = self.project / "ROUTE.md"
@@ -938,6 +971,43 @@ class RouteCliTests(unittest.TestCase):
                 ROUTE_CLI.scaffold_handoff(self.project)
 
         self.assertEqual(handoff.read_bytes(), before)
+
+    def test_handoff_refuses_route_mutation_on_entry_to_atomic_write(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        handoff = self.project / "HANDOFF.md"
+        before = handoff.read_bytes()
+        original_write = ROUTE_CLI._atomic_write_bytes
+
+        def mutate_then_write(path: Path, content: bytes, *args, **kwargs) -> None:
+            route.write_bytes(route.read_bytes() + b"\n")
+            original_write(path, content, *args, **kwargs)
+
+        with mock.patch.object(
+            ROUTE_CLI, "_atomic_write_bytes", side_effect=mutate_then_write
+        ):
+            with self.assertRaisesRegex(ValueError, "changed while generating handoff"):
+                ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), before)
+
+    def test_state_symlink_is_rejected_by_validate_handoff_and_claim(self):
+        self.init_project_with_item()
+        external = Path(self.temporary_directory.name) / "external-state"
+        external.mkdir()
+        (external / "claims").mkdir()
+        state = self.project / ".research-route"
+        shutil.rmtree(state)
+        state.symlink_to(external, target_is_directory=True)
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.scaffold_handoff(self.project)
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        self.assertIn("invalid-claim", {issue.code for issue in issues})
+        self.assertEqual(list((external / "claims").iterdir()), [])
 
     def test_validate_reports_missing_paths_and_malformed_frontmatter(self):
         self.init_project()
