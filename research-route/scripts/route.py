@@ -13,7 +13,7 @@ import sys
 import tempfile
 import unicodedata
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "assets" / "route-template"
@@ -78,6 +78,8 @@ SHORTCUT_REFERENCE = re.compile(r"(?<!!)\[([^\]\n]+)\](?![\[(]|:)")
 REFERENCE_DEFINITION = re.compile(
     r"(?m)^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))"
 )
+HANDOFF_BEGIN = b"<!-- BEGIN ROUTE MECHANICAL -->"
+HANDOFF_END = b"<!-- END ROUTE MECHANICAL -->"
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,36 @@ class ValidationIssue:
     code: str
     path: str
     message: str
+
+
+@dataclass(frozen=True)
+class MigrationPlan:
+    current_version: int
+    target_version: int
+    changes: tuple[str, ...]
+    applicable: bool
+
+
+Migration = Callable[[Path, bool], tuple[str, ...]]
+MIGRATIONS: dict[tuple[int, int], Migration] = {}
+
+
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(content)
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def _is_supported_value(value: object) -> bool:
@@ -813,6 +845,103 @@ def init_route(destination: Path, title: str, language: str) -> Path:
             shutil.rmtree(staging)
 
 
+def scaffold_handoff(root: Path) -> Path:
+    route = _require_route(root)
+    metadata, route_body = parse_frontmatter(route)
+    handoff = root / "HANDOFF.md"
+    if handoff.is_symlink() or not handoff.is_file():
+        raise ValueError(f"missing HANDOFF.md in {root}")
+    original = handoff.read_bytes()
+    if original.count(HANDOFF_BEGIN) != 1 or original.count(HANDOFF_END) != 1:
+        raise ValueError("HANDOFF.md must contain exactly one mechanical marker pair")
+    prefix, remainder = original.split(HANDOFF_BEGIN, 1)
+    _, suffix = remainder.split(HANDOFF_END, 1)
+
+    open_items: list[str] = []
+    work_items = _require_directory(root / "work-items")
+    for path in sorted(work_items.glob("*.md")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        item_metadata, _ = parse_frontmatter(path)
+        if item_metadata.get("status") == "open":
+            open_items.append(
+                f"- {item_metadata.get('id')}: {item_metadata.get('title')}"
+            )
+
+    active_claims: list[str] = []
+    claims = root / ".research-route" / "claims"
+    if claims.is_symlink() or claims.exists():
+        _require_directory(claims)
+        for path in sorted(claims.glob("*.lock")):
+            claim = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(claim, dict):
+                raise ValueError(f"invalid claim: {path}")
+            active_claims.append(
+                f"- {claim.get('item_id')}: {claim.get('owner')}"
+            )
+
+    generated_at = datetime.now(timezone.utc).isoformat()
+    route_modified = datetime.fromtimestamp(
+        route.stat().st_mtime, timezone.utc
+    ).isoformat()
+    blocks_match = re.search(
+        r"(?ms)^## Blocks[ \t]*\r?\n(.*?)(?=^## |\Z)", route_body
+    )
+    blocks = blocks_match.group(1).strip() if blocks_match else ""
+    mechanical = (
+        "\n\n"
+        f"- Project: {metadata.get('project_title')}\n"
+        f"- Schema version: {metadata.get('schema_version')}\n"
+        f"- Current cycle: {metadata.get('current_cycle')}\n"
+        f"- Target venue: {metadata.get('target_venue')}\n"
+        f"- Fallback venue: {metadata.get('fallback_venue')}\n"
+        f"- Generated at: {generated_at}\n"
+        f"- ROUTE.md modified: {route_modified}\n\n"
+        "### Open frontier candidates\n\n"
+        + ("\n".join(open_items) if open_items else "- None")
+        + "\n\n### Active claims\n\n"
+        + ("\n".join(active_claims) if active_claims else "- None")
+        + "\n\n### Blocks\n\n"
+        + (blocks if blocks else "- None")
+        + "\n\n"
+    ).encode("utf-8")
+    _atomic_write_bytes(
+        handoff, prefix + HANDOFF_BEGIN + mechanical + HANDOFF_END + suffix
+    )
+    return handoff
+
+
+def migrate_route(root: Path, target_version: int, apply: bool) -> MigrationPlan:
+    route = _require_route(root)
+    metadata, _ = parse_frontmatter(route)
+    current_version = metadata.get("schema_version")
+    if type(current_version) is not int:
+        raise ValueError("ROUTE.md schema_version must be an integer")
+    if current_version > PROJECT_SCHEMA_VERSION:
+        return MigrationPlan(
+            current_version,
+            target_version,
+            (f"unsupported current schema version {current_version}",),
+            False,
+        )
+    if target_version == current_version:
+        return MigrationPlan(current_version, target_version, (), True)
+    migration = MIGRATIONS.get((current_version, target_version))
+    if migration is None:
+        return MigrationPlan(
+            current_version,
+            target_version,
+            (f"no migration from schema version {current_version} to {target_version}",),
+            False,
+        )
+    return MigrationPlan(
+        current_version,
+        target_version,
+        migration(root, apply),
+        True,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="route.py")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -843,6 +972,12 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser = commands.add_parser("validate")
     validate_parser.add_argument("--root", type=Path, required=True)
     validate_parser.add_argument("--json", action="store_true")
+    handoff_parser = commands.add_parser("handoff")
+    handoff_parser.add_argument("--root", type=Path, required=True)
+    migrate_parser = commands.add_parser("migrate")
+    migrate_parser.add_argument("--root", type=Path, required=True)
+    migrate_parser.add_argument("--to", type=int, required=True, dest="target_version")
+    migrate_parser.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -878,6 +1013,22 @@ def main(argv: list[str] | None = None) -> int:
                 for issue in issues:
                     print(f"{issue.path}: {issue.code}: {issue.message}")
             return 1 if issues else 0
+        elif arguments.command == "handoff":
+            scaffold_handoff(arguments.root)
+        elif arguments.command == "migrate":
+            plan = migrate_route(
+                arguments.root, arguments.target_version, arguments.apply
+            )
+            if arguments.apply and not plan.applicable:
+                print("error: refusing to apply unknown migration", file=sys.stderr)
+            if plan.current_version == plan.target_version:
+                print(f"already at schema version {plan.current_version}")
+            else:
+                if plan.applicable and not arguments.apply:
+                    print("dry run; no files modified")
+                for change in plan.changes:
+                    print(change)
+            return 0 if plan.applicable else 1
     except (FileExistsError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

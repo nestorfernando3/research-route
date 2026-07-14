@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -80,6 +81,13 @@ class RouteCliTests(unittest.TestCase):
             encoding="utf-8",
         )
         return path
+
+    def project_snapshot(self) -> dict[str, bytes]:
+        return {
+            path.relative_to(self.project).as_posix(): path.read_bytes()
+            for path in self.project.rglob("*")
+            if path.is_file()
+        }
 
     def test_init_copies_portable_template_and_sets_project_metadata(self):
         result = self.run_cli(
@@ -985,3 +993,131 @@ class RouteCliTests(unittest.TestCase):
 
         self.assertEqual(len(broken), 1)
         self.assertIn("sources/missing.md", broken[0].message)
+
+    def test_handoff_preserves_intellectual_sections(self):
+        self.init_project_with_item()
+        handoff = self.project / "HANDOFF.md"
+        manual_prose = (
+            "\nA hard-won interpretation.\n"
+            "<!-- manual comments stay untouched -->\n"
+        )
+        handoff.write_bytes(handoff.read_bytes() + manual_prose.encode("utf-8"))
+        before = handoff.read_bytes()
+        prefix, remainder = before.split(b"<!-- BEGIN ROUTE MECHANICAL -->", 1)
+        _, suffix = remainder.split(b"<!-- END ROUTE MECHANICAL -->", 1)
+
+        result = self.run_cli("handoff", "--root", str(self.project))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = handoff.read_bytes()
+        after_prefix, after_remainder = after.split(
+            b"<!-- BEGIN ROUTE MECHANICAL -->", 1
+        )
+        mechanical, after_suffix = after_remainder.split(
+            b"<!-- END ROUTE MECHANICAL -->", 1
+        )
+        self.assertEqual(after_prefix, prefix)
+        self.assertEqual(after_suffix, suffix)
+        self.assertIn(b"Test route", mechanical)
+        self.assertIn(b"rr-001", mechanical)
+        self.assertIn(b"Generated at", mechanical)
+        self.assertIn(b"ROUTE.md modified", mechanical)
+
+    def test_migrate_current_version_is_a_non_mutating_no_op(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        before = self.project_snapshot()
+
+        result = self.run_cli("migrate", "--root", str(self.project), "--to", "1")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already at schema version 1", result.stdout)
+        self.assertEqual(self.project_snapshot(), before)
+
+    def test_migrate_refuses_unsupported_future_project_without_mutation(self):
+        self.init_project_with_item()
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        metadata["schema_version"] = 99
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        before = self.project_snapshot()
+
+        result = self.run_cli("migrate", "--root", str(self.project), "--to", "1")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported current schema version 99", result.stdout)
+        self.assertEqual(self.project_snapshot(), before)
+
+    def test_migrate_is_a_dry_run_by_default(self):
+        self.init_project()
+        calls: list[bool] = []
+
+        def migration(root: Path, apply: bool) -> tuple[str, ...]:
+            calls.append(apply)
+            if apply:
+                (root / "unexpected-mutation").write_text("changed")
+            return ("add a future field",)
+
+        before = self.project_snapshot()
+        stdout = io.StringIO()
+        with mock.patch.dict(ROUTE_CLI.MIGRATIONS, {(1, 2): migration}):
+            with mock.patch("sys.stdout", stdout):
+                returncode = ROUTE_CLI.main(
+                    ["migrate", "--root", str(self.project), "--to", "2"]
+                )
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(calls, [False])
+        self.assertIn("dry run", stdout.getvalue().lower())
+        self.assertEqual(self.project_snapshot(), before)
+
+    def test_migrate_explicitly_refuses_to_apply_unknown_migration(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        before = self.project_snapshot()
+
+        result = self.run_cli(
+            "migrate",
+            "--root",
+            str(self.project),
+            "--to",
+            "2",
+            "--apply",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to apply unknown migration", result.stderr.lower())
+        self.assertEqual(self.project_snapshot(), before)
+
+    def test_handoff_lists_route_state_claims_and_blocks(self):
+        self.init_project_with_item()
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        metadata["target_venue"] = "Journal A"
+        metadata["fallback_venue"] = "Journal B"
+        body = body.replace("## Blocks\n", "## Blocks\n\nArchive access delayed.\n")
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+
+        self.assertIn("Current cycle: discover", handoff)
+        self.assertIn("Target venue: Journal A", handoff)
+        self.assertIn("Fallback venue: Journal B", handoff)
+        self.assertIn("rr-001: Map rival accounts", handoff)
+        self.assertIn("rr-001: agent-a", handoff)
+        self.assertIn("Archive access delayed.", handoff)
+
+    def test_handoff_refuses_broken_claims_symlink_without_modifying_prose(self):
+        self.init_project()
+        state = self.project / ".research-route"
+        state.mkdir()
+        claims = state / "claims"
+        claims.symlink_to(state / "missing-claims", target_is_directory=True)
+        handoff = self.project / "HANDOFF.md"
+        before = handoff.read_bytes()
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), before)
