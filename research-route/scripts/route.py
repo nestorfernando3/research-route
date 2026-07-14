@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -29,6 +30,56 @@ ALLOWED_ITEM_TYPES = {
     "human-checkpoint",
 }
 ALLOWED_MODES = {"light", "deep"}
+ALLOWED_STATUSES = {"open", "closed"}
+ALLOWED_CYCLES = {"discover", "argue", "compose", "audit"}
+PROJECT_SCHEMA_VERSION = 1
+REQUIRED_FILES = (
+    "ROUTE.md",
+    "INQUIRY.md",
+    "VENUE.md",
+    "CLAIMS.md",
+    "DECISIONS.md",
+    "RESEARCHER.md",
+    "HANDOFF.md",
+    "manuscript/OUTLINE.md",
+    "manuscript/VOICE.md",
+    "references/library.bib",
+)
+REQUIRED_DIRECTORIES = (
+    "work-items",
+    "sources",
+    "manuscript",
+    "manuscript/sections",
+    "references",
+)
+ROUTE_FIELDS = {
+    "schema_version",
+    "project_title",
+    "language",
+    "current_cycle",
+    "target_venue",
+    "fallback_venue",
+    "next_work_item",
+}
+ITEM_FIELDS = {
+    "id",
+    "title",
+    "schema_version",
+    "type",
+    "status",
+    "depends_on",
+    "owner",
+    "mode",
+    "output",
+}
+MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    code: str
+    path: str
+    message: str
 
 
 def _is_supported_value(value: object) -> bool:
@@ -309,6 +360,373 @@ def release_item(
         lock.unlink()
 
 
+def _relative_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _missing_fields(
+    issues: list[ValidationIssue],
+    root: Path,
+    path: Path,
+    metadata: dict[str, object],
+    required_fields: set[str],
+) -> None:
+    relative_path = _relative_path(root, path)
+    for field in sorted(required_fields - metadata.keys()):
+        issues.append(
+            ValidationIssue(
+                "missing-field", relative_path, f"missing required field: {field}"
+            )
+        )
+
+
+def _dependency_cycles(graph: dict[str, list[str]]) -> list[tuple[str, ...]]:
+    state: dict[str, int] = {}
+    stack: list[str] = []
+    cycles: set[tuple[str, ...]] = set()
+
+    def visit(item_id: str) -> None:
+        state[item_id] = 1
+        stack.append(item_id)
+        for dependency in sorted(graph.get(item_id, [])):
+            if dependency not in graph:
+                continue
+            if state.get(dependency, 0) == 0:
+                visit(dependency)
+            elif state.get(dependency) == 1:
+                cycle = stack[stack.index(dependency) :]
+                smallest = min(range(len(cycle)), key=cycle.__getitem__)
+                cycles.add(tuple(cycle[smallest:] + cycle[:smallest]))
+        stack.pop()
+        state[item_id] = 2
+
+    for item_id in sorted(graph):
+        if state.get(item_id, 0) == 0:
+            visit(item_id)
+    return sorted(cycles)
+
+
+def _validate_markdown_links(
+    root: Path, issues: list[ValidationIssue]
+) -> None:
+    for path in sorted(root.rglob("*.md")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            issues.append(
+                ValidationIssue(
+                    "unreadable-file", _relative_path(root, path), str(error)
+                )
+            )
+            continue
+        for match in MARKDOWN_LINK.finditer(text):
+            destination = match.group(1).strip()
+            if destination.startswith("<") and ">" in destination:
+                destination = destination[1 : destination.index(">")]
+            else:
+                destination = destination.split(maxsplit=1)[0]
+            lowered = destination.lower()
+            if (
+                not destination
+                or destination.startswith("#")
+                or lowered.startswith(("http:", "https:", "mailto:"))
+                or destination.startswith("/")
+            ):
+                continue
+            target_text = destination.partition("#")[0].partition("?")[0]
+            if target_text and not (path.parent / target_text).exists():
+                issues.append(
+                    ValidationIssue(
+                        "broken-link",
+                        _relative_path(root, path),
+                        f"relative link does not exist: {destination}",
+                    )
+                )
+
+
+def validate_route(root: Path) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    if root.is_symlink() or not root.is_dir():
+        return [
+            ValidationIssue("missing-path", ".", "research route root is missing")
+        ]
+
+    for relative_path in REQUIRED_FILES:
+        path = root / relative_path
+        if path.is_symlink() or not path.is_file():
+            issues.append(
+                ValidationIssue(
+                    "missing-path", relative_path, "required file is missing"
+                )
+            )
+    for relative_path in REQUIRED_DIRECTORIES:
+        path = root / relative_path
+        if path.is_symlink() or not path.is_dir():
+            issues.append(
+                ValidationIssue(
+                    "missing-path", relative_path, "required directory is missing"
+                )
+            )
+
+    route_path = root / "ROUTE.md"
+    if route_path.is_file() and not route_path.is_symlink():
+        try:
+            route_metadata, _ = parse_frontmatter(route_path)
+        except (OSError, UnicodeError, ValueError) as error:
+            issues.append(
+                ValidationIssue("invalid-frontmatter", "ROUTE.md", str(error))
+            )
+        else:
+            _missing_fields(
+                issues, root, route_path, route_metadata, ROUTE_FIELDS
+            )
+            for field in ("project_title", "language"):
+                value = route_metadata.get(field)
+                if field in route_metadata and (
+                    not isinstance(value, str) or not value.strip()
+                ):
+                    issues.append(
+                        ValidationIssue(
+                            "invalid-field",
+                            "ROUTE.md",
+                            f"{field} must be a non-empty string",
+                        )
+                    )
+            for field in ("target_venue", "fallback_venue"):
+                value = route_metadata.get(field)
+                if value is not None and not isinstance(value, str):
+                    issues.append(
+                        ValidationIssue(
+                            "invalid-field",
+                            "ROUTE.md",
+                            f"{field} must be a string or null",
+                        )
+                    )
+            schema_version = route_metadata.get("schema_version")
+            if schema_version != PROJECT_SCHEMA_VERSION:
+                issues.append(
+                    ValidationIssue(
+                        "unsupported-schema",
+                        "ROUTE.md",
+                        f"unsupported schema_version: {schema_version!r}",
+                    )
+                )
+            cycle = route_metadata.get("current_cycle")
+            if cycle is not None and (
+                not isinstance(cycle, str) or cycle not in ALLOWED_CYCLES
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-enum",
+                        "ROUTE.md",
+                        f"unsupported current_cycle: {cycle!r}",
+                    )
+                )
+            counter = route_metadata.get("next_work_item")
+            if counter is not None and (type(counter) is not int or counter < 1):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-field",
+                        "ROUTE.md",
+                        "next_work_item must be a positive integer",
+                    )
+                )
+
+    items_by_id: dict[str, list[Path]] = {}
+    dependencies_by_id: dict[str, list[str]] = {}
+    work_items = root / "work-items"
+    if work_items.is_dir() and not work_items.is_symlink():
+        for path in sorted(work_items.glob("*.md")):
+            relative_path = _relative_path(root, path)
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                metadata, _ = parse_frontmatter(path)
+            except (OSError, UnicodeError, ValueError) as error:
+                issues.append(
+                    ValidationIssue("invalid-frontmatter", relative_path, str(error))
+                )
+                continue
+            _missing_fields(issues, root, path, metadata, ITEM_FIELDS)
+            item_id = metadata.get("id")
+            if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-field", relative_path, f"invalid work-item id: {item_id!r}"
+                    )
+                )
+                continue
+            items_by_id.setdefault(item_id, []).append(path)
+            title = metadata.get("title")
+            if "title" in metadata and (
+                not isinstance(title, str) or not title.strip()
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-field",
+                        relative_path,
+                        "title must be a non-empty string",
+                    )
+                )
+            for field in ("owner", "output"):
+                value = metadata.get(field)
+                if value is not None and not isinstance(value, str):
+                    issues.append(
+                        ValidationIssue(
+                            "invalid-field",
+                            relative_path,
+                            f"{field} must be a string or null",
+                        )
+                    )
+            if not path.name.startswith(f"{item_id}-"):
+                issues.append(
+                    ValidationIssue(
+                        "item-id-mismatch",
+                        relative_path,
+                        f"filename does not match work-item id {item_id}",
+                    )
+                )
+            if metadata.get("schema_version") != PROJECT_SCHEMA_VERSION:
+                issues.append(
+                    ValidationIssue(
+                        "unsupported-schema",
+                        relative_path,
+                        f"unsupported schema_version: {metadata.get('schema_version')!r}",
+                    )
+                )
+            for field, allowed in (
+                ("type", ALLOWED_ITEM_TYPES),
+                ("status", ALLOWED_STATUSES),
+                ("mode", ALLOWED_MODES),
+            ):
+                value = metadata.get(field)
+                if value is not None and (
+                    not isinstance(value, str) or value not in allowed
+                ):
+                    issues.append(
+                        ValidationIssue(
+                            "invalid-enum",
+                            relative_path,
+                            f"unsupported {field}: {value!r}",
+                        )
+                    )
+            dependencies = metadata.get("depends_on")
+            if not isinstance(dependencies, list) or not all(
+                isinstance(dependency, str) and ITEM_ID.fullmatch(dependency)
+                for dependency in dependencies
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-field",
+                        relative_path,
+                        "depends_on must be a list of work-item IDs",
+                    )
+                )
+            else:
+                dependencies_by_id.setdefault(item_id, []).extend(dependencies)
+
+    for item_id, paths in sorted(items_by_id.items()):
+        if len(paths) > 1:
+            names = ", ".join(_relative_path(root, path) for path in paths)
+            for path in paths:
+                issues.append(
+                    ValidationIssue(
+                        "duplicate-id",
+                        _relative_path(root, path),
+                        f"work-item id {item_id} is duplicated in: {names}",
+                    )
+                )
+    known_ids = set(items_by_id)
+    for item_id, dependencies in sorted(dependencies_by_id.items()):
+        for dependency in sorted(set(dependencies) - known_ids):
+            for path in items_by_id[item_id]:
+                issues.append(
+                    ValidationIssue(
+                        "missing-dependency",
+                        _relative_path(root, path),
+                        f"dependency does not exist: {dependency}",
+                    )
+                )
+    graph = {
+        item_id: sorted(set(dependencies))
+        for item_id, dependencies in dependencies_by_id.items()
+    }
+    for cycle in _dependency_cycles(graph):
+        cycle_text = " -> ".join((*cycle, cycle[0]))
+        for item_id in cycle:
+            for path in items_by_id[item_id]:
+                issues.append(
+                    ValidationIssue(
+                        "dependency-cycle",
+                        _relative_path(root, path),
+                        f"dependency cycle: {cycle_text}",
+                    )
+                )
+
+    claims = root / ".research-route" / "claims"
+    if claims.is_dir() and not claims.is_symlink():
+        for path in sorted(claims.glob("*.lock")):
+            relative_path = _relative_path(root, path)
+            filename_id = path.stem
+            try:
+                claim = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                issues.append(
+                    ValidationIssue("invalid-claim", relative_path, str(error))
+                )
+                continue
+            if not isinstance(claim, dict):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-claim", relative_path, "claim must be a JSON object"
+                    )
+                )
+                continue
+            claimed_id = claim.get("item_id")
+            if claimed_id != filename_id:
+                issues.append(
+                    ValidationIssue(
+                        "claim-mismatch",
+                        relative_path,
+                        f"claim item_id {claimed_id!r} does not match {filename_id!r}",
+                    )
+                )
+            if not isinstance(claimed_id, str):
+                issues.append(
+                    ValidationIssue(
+                        "invalid-claim",
+                        relative_path,
+                        "claim item_id must be a work-item ID",
+                    )
+                )
+            referenced_ids = {filename_id}
+            if isinstance(claimed_id, str):
+                referenced_ids.add(claimed_id)
+            for item_id in referenced_ids:
+                if item_id not in known_ids:
+                    issues.append(
+                        ValidationIssue(
+                            "orphan-claim",
+                            relative_path,
+                            f"claim references missing work item: {item_id}",
+                        )
+                    )
+            if not isinstance(claim.get("owner"), str) or not claim["owner"]:
+                issues.append(
+                    ValidationIssue(
+                        "invalid-claim", relative_path, "claim owner must not be empty"
+                    )
+                )
+
+    _validate_markdown_links(root, issues)
+    return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
+
+
 def init_route(destination: Path, title: str, language: str) -> Path:
     if destination.is_symlink() or destination.exists() and (
         not destination.is_dir() or any(destination.iterdir())
@@ -364,6 +782,9 @@ def _build_parser() -> argparse.ArgumentParser:
     release_parser.add_argument("--root", type=Path, required=True)
     release_parser.add_argument("--owner", required=True)
     release_parser.add_argument("--force", action="store_true")
+    validate_parser = commands.add_parser("validate")
+    validate_parser.add_argument("--root", type=Path, required=True)
+    validate_parser.add_argument("--json", action="store_true")
     return parser
 
 
@@ -391,6 +812,14 @@ def main(argv: list[str] | None = None) -> int:
                     f"warning: forcibly released claim for {arguments.item_id}",
                     file=sys.stderr,
                 )
+        elif arguments.command == "validate":
+            issues = validate_route(arguments.root)
+            if arguments.json:
+                print(json.dumps([asdict(issue) for issue in issues], ensure_ascii=False))
+            else:
+                for issue in issues:
+                    print(f"{issue.path}: {issue.code}: {issue.message}")
+            return 1 if issues else 0
     except (FileExistsError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

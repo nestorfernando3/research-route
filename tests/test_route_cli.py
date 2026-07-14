@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location("research_route_cli", CLI)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load route CLI from {CLI}")
 ROUTE_CLI = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = ROUTE_CLI
 SPEC.loader.exec_module(ROUTE_CLI)
 
 
@@ -56,6 +57,29 @@ class RouteCliTests(unittest.TestCase):
             "deep",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def write_item(
+        self, filename: str, item_id: str, depends_on: list[str]
+    ) -> Path:
+        path = self.project / "work-items" / filename
+        path.write_text(
+            ROUTE_CLI._frontmatter_text(
+                {
+                    "id": item_id,
+                    "title": "Test work item",
+                    "schema_version": 1,
+                    "type": "synthesis",
+                    "status": "open",
+                    "depends_on": depends_on,
+                    "owner": None,
+                    "mode": "deep",
+                    "output": None,
+                },
+                "\n# Work item\n",
+            ),
+            encoding="utf-8",
+        )
+        return path
 
     def test_init_copies_portable_template_and_sets_project_metadata(self):
         result = self.run_cli(
@@ -625,3 +649,181 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual({lock.name for lock in locks}, {"rr-001.lock", "rr-002.lock"})
         self.assertTrue(claims.is_dir())
         self.assertFalse(claims.is_symlink())
+
+    def test_validate_reports_broken_links_duplicate_ids_and_missing_dependencies(self):
+        self.init_project()
+        self.write_item("rr-001-a.md", item_id="rr-001", depends_on=["rr-999"])
+        self.write_item("rr-001-b.md", item_id="rr-001", depends_on=[])
+        (self.project / "CLAIMS.md").write_text(
+            "[missing source](sources/not-there.md)\n", encoding="utf-8"
+        )
+
+        result = self.run_cli("validate", "--root", str(self.project), "--json")
+
+        issues = json.loads(result.stdout)
+        codes = {issue["code"] for issue in issues}
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(
+            {"duplicate-id", "missing-dependency", "broken-link"}.issubset(codes)
+        )
+        self.assertEqual(
+            issues,
+            sorted(
+                issues,
+                key=lambda issue: (issue["path"], issue["code"], issue["message"]),
+            ),
+        )
+
+    def test_validate_accepts_a_fresh_route(self):
+        self.init_project()
+
+        result = self.run_cli("validate", "--root", str(self.project))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_validate_reports_schema_fields_enums_cycles_and_claim_inconsistency(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        route_metadata, route_body = ROUTE_CLI.parse_frontmatter(route)
+        route_metadata["schema_version"] = 99
+        route_metadata.pop("language")
+        ROUTE_CLI.write_frontmatter(route, route_metadata, route_body)
+        first = self.write_item("rr-001-first.md", "rr-001", ["rr-002"])
+        self.write_item("rr-002-second.md", "rr-002", ["rr-001"])
+        first_metadata, first_body = ROUTE_CLI.parse_frontmatter(first)
+        first_metadata.pop("output")
+        first_metadata["type"] = "unsupported"
+        first_metadata["status"] = "running"
+        first_metadata["mode"] = "medium"
+        ROUTE_CLI.write_frontmatter(first, first_metadata, first_body)
+        claims = self.project / ".research-route" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "rr-003.lock").write_text(
+            json.dumps(
+                {
+                    "item_id": "rr-004",
+                    "owner": "agent-a",
+                    "timestamp": "2026-07-13T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        codes = {issue.code for issue in issues}
+
+        self.assertTrue(
+            {
+                "unsupported-schema",
+                "missing-field",
+                "invalid-enum",
+                "dependency-cycle",
+                "claim-mismatch",
+                "orphan-claim",
+            }.issubset(codes)
+        )
+        self.assertEqual(
+            issues,
+            sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message)),
+        )
+
+    def test_validate_reports_missing_paths_and_malformed_frontmatter(self):
+        self.init_project()
+        shutil.rmtree(self.project / "sources")
+        (self.project / "VENUE.md").unlink()
+        (self.project / "work-items" / "rr-001-bad.md").write_text(
+            "not frontmatter\n", encoding="utf-8"
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        codes = {issue.code for issue in issues}
+
+        self.assertIn("missing-path", codes)
+        self.assertIn("invalid-frontmatter", codes)
+
+    def test_validate_ignores_external_fragment_and_durable_state_artifacts(self):
+        self.init_project_with_item()
+        claims = self.project / ".research-route" / "claims"
+        claims.mkdir(exist_ok=True)
+        (claims / "rr-001.lock").write_text(
+            json.dumps(
+                {
+                    "item_id": "rr-001",
+                    "owner": "agent-a",
+                    "timestamp": "2026-07-13T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.project / "CLAIMS.md").write_text(
+            "[web](https://example.com) [mail](mailto:a@example.com) "
+            "[fragment](#claims)\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertEqual(issues, [])
+
+    def test_validate_human_output_uses_one_issue_per_line(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "[one](sources/one.md) [two](sources/two.md)\n", encoding="utf-8"
+        )
+
+        result = self.run_cli("validate", "--root", str(self.project))
+
+        self.assertEqual(result.returncode, 1)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all("broken-link" in line for line in lines))
+
+    def test_validate_reports_non_scalar_enum_values_without_crashing(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        metadata["current_cycle"] = ["discover"]
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        item = self.write_item("rr-001-item.md", "rr-001", [])
+        item_metadata, item_body = ROUTE_CLI.parse_frontmatter(item)
+        item_metadata["type"] = ["source"]
+        ROUTE_CLI.write_frontmatter(item, item_metadata, item_body)
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertGreaterEqual(
+            sum(issue.code == "invalid-enum" for issue in issues), 2
+        )
+
+    def test_validate_reports_non_scalar_claim_id_without_crashing(self):
+        self.init_project()
+        claims = self.project / ".research-route" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "rr-001.lock").write_text(
+            json.dumps({"item_id": ["rr-001"], "owner": "agent-a"}),
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertIn("invalid-claim", {issue.code for issue in issues})
+
+    def test_validate_reports_invalid_route_and_item_field_types(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        route_metadata, route_body = ROUTE_CLI.parse_frontmatter(route)
+        route_metadata["project_title"] = ["not", "a", "title"]
+        route_metadata["language"] = None
+        ROUTE_CLI.write_frontmatter(route, route_metadata, route_body)
+        item = self.write_item("rr-001-item.md", "rr-001", [])
+        item_metadata, item_body = ROUTE_CLI.parse_frontmatter(item)
+        item_metadata["title"] = ["not", "a", "title"]
+        item_metadata["owner"] = 7
+        item_metadata["output"] = ["not", "a", "path"]
+        ROUTE_CLI.write_frontmatter(item, item_metadata, item_body)
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertGreaterEqual(
+            sum(issue.code == "invalid-field" for issue in issues), 5
+        )
