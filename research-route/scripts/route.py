@@ -74,6 +74,7 @@ ITEM_FIELDS = {
 }
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 REFERENCE_LINK = re.compile(r"!?\[([^\]]+)\]\[([^\]]*)\]")
+SHORTCUT_REFERENCE = re.compile(r"(?<!!)\[([^\]\n]+)\](?![\[(]|:)")
 REFERENCE_DEFINITION = re.compile(
     r"(?m)^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))"
 )
@@ -481,6 +482,11 @@ def _validate_markdown_links(
             _reference_label(match.group(2) or match.group(1))
             for match in REFERENCE_LINK.finditer(text)
         }
+        references.update(
+            label
+            for match in SHORTCUT_REFERENCE.finditer(text)
+            if (label := _reference_label(match.group(1))) in definitions
+        )
         for label in sorted(references):
             destination = definitions.get(label)
             if destination is None:

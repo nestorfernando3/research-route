@@ -920,3 +920,68 @@ class RouteCliTests(unittest.TestCase):
         issues = ROUTE_CLI.validate_route(self.project)
 
         self.assertEqual(issues, [])
+
+    def test_validate_reports_broken_shortcut_reference_link(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "Read [src].\n\n[src]: sources/missing.md\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        broken = [issue for issue in issues if issue.code == "broken-link"]
+
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0].path, "CLAIMS.md")
+        self.assertIn("sources/missing.md", broken[0].message)
+
+    def test_validate_accepts_valid_shortcut_reference_link(self):
+        self.init_project()
+        (self.project / "sources" / "present.md").write_text(
+            "# Present\n", encoding="utf-8"
+        )
+        (self.project / "CLAIMS.md").write_text(
+            "Read [src].\n\n[src]: sources/present.md\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertEqual(issues, [])
+
+    def test_validate_ignores_external_and_fragment_shortcut_references(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "Read [web] and [section].\n\n"
+            "[web]: https://example.com/source\n"
+            "[section]: #claims\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertEqual(issues, [])
+
+    def test_validate_does_not_treat_ordinary_brackets_as_shortcut_links(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "This [ordinary bracketed text] has no reference definition.\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertEqual(issues, [])
+
+    def test_validate_preserves_collapsed_reference_links(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "Read [src][].\n\n[src]: sources/missing.md\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        broken = [issue for issue in issues if issue.code == "broken-link"]
+
+        self.assertEqual(len(broken), 1)
+        self.assertIn("sources/missing.md", broken[0].message)
