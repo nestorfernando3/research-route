@@ -56,6 +56,39 @@ class RouteCliTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.project / "notes.md").read_text(), "mine")
 
+    def test_init_refuses_symlink_to_empty_directory_without_touching_it(self):
+        target = Path(self.temporary_directory.name) / "target"
+        target.mkdir()
+        self.project.symlink_to(target, target_is_directory=True)
+
+        try:
+            ROUTE_CLI.init_route(self.project, "Title", "en")
+        except Exception as error:
+            caught_error = error
+        else:
+            caught_error = None
+
+        self.assertIsInstance(caught_error, FileExistsError)
+        self.assertTrue(self.project.is_symlink())
+        self.assertEqual(self.project.resolve(), target.resolve())
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_init_refuses_broken_symlink_without_touching_it(self):
+        missing_target = Path(self.temporary_directory.name) / "missing-target"
+        self.project.symlink_to(missing_target, target_is_directory=True)
+
+        try:
+            ROUTE_CLI.init_route(self.project, "Title", "en")
+        except Exception as error:
+            caught_error = error
+        else:
+            caught_error = None
+
+        self.assertIsInstance(caught_error, FileExistsError)
+        self.assertTrue(self.project.is_symlink())
+        self.assertEqual(self.project.readlink(), missing_target)
+        self.assertFalse(missing_target.exists())
+
     def test_parse_frontmatter_accepts_supported_scalars_and_preserves_body(self):
         route = Path(self.temporary_directory.name) / "ROUTE.md"
         body = "\n# Body\n\nKeep this exactly.\n"

@@ -109,7 +109,7 @@ def write_frontmatter(
 
 
 def init_route(destination: Path, title: str, language: str) -> Path:
-    if destination.exists() and (
+    if destination.is_symlink() or destination.exists() and (
         not destination.is_dir() or any(destination.iterdir())
     ):
         raise FileExistsError(f"destination is not empty: {destination}")
