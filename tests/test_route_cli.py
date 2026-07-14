@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,27 @@ class RouteCliTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def init_project(self) -> None:
+        result = self.run_cli(
+            "init", str(self.project), "--title", "Test route", "--language", "en"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def init_project_with_item(self) -> None:
+        self.init_project()
+        result = self.run_cli(
+            "new",
+            "--root",
+            str(self.project),
+            "--title",
+            "Map rival accounts",
+            "--type",
+            "synthesis",
+            "--mode",
+            "deep",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_init_copies_portable_template_and_sets_project_metadata(self):
         result = self.run_cli(
@@ -179,3 +201,140 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(
             list(self.project.parent.glob(f".{self.project.name}.*.tmp")), []
         )
+
+    def test_new_allocates_stable_ids_and_updates_counter(self):
+        self.init_project()
+
+        first = self.run_cli(
+            "new",
+            "--root",
+            str(self.project),
+            "--title",
+            "Map rival accounts",
+            "--type",
+            "synthesis",
+            "--mode",
+            "deep",
+        )
+        second = self.run_cli(
+            "new",
+            "--root",
+            str(self.project),
+            "--title",
+            "Check archive scope",
+            "--type",
+            "source",
+            "--mode",
+            "light",
+            "--depends-on",
+            "rr-001",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        first_item = self.project / "work-items" / "rr-001-map-rival-accounts.md"
+        second_item = self.project / "work-items" / "rr-002-check-archive-scope.md"
+        self.assertTrue(first_item.exists())
+        self.assertTrue(second_item.exists())
+        first_metadata, _ = ROUTE_CLI.parse_frontmatter(first_item)
+        second_metadata, _ = ROUTE_CLI.parse_frontmatter(second_item)
+        self.assertEqual(
+            first_metadata,
+            {
+                "id": "rr-001",
+                "title": "Map rival accounts",
+                "schema_version": 1,
+                "type": "synthesis",
+                "status": "open",
+                "depends_on": [],
+                "owner": None,
+                "mode": "deep",
+                "output": None,
+            },
+        )
+        self.assertEqual(second_metadata["depends_on"], ["rr-001"])
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 3)
+
+    def test_claim_is_atomic_and_release_requires_owner(self):
+        self.init_project_with_item()
+
+        first = self.run_cli(
+            "claim", "rr-001", "--root", str(self.project), "--owner", "agent-a"
+        )
+        second = self.run_cli(
+            "claim", "rr-001", "--root", str(self.project), "--owner", "agent-b"
+        )
+        wrong_release = self.run_cli(
+            "release", "rr-001", "--root", str(self.project), "--owner", "agent-b"
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertNotEqual(wrong_release.returncode, 0)
+        lock = self.project / ".research-route" / "claims" / "rr-001.lock"
+        claim = json.loads(lock.read_text(encoding="utf-8"))
+        self.assertEqual(claim["item_id"], "rr-001")
+        self.assertEqual(claim["owner"], "agent-a")
+        self.assertRegex(claim["timestamp"], r"^\d{4}-\d{2}-\d{2}T.*\+00:00$")
+
+        owner_release = self.run_cli(
+            "release", "rr-001", "--root", str(self.project), "--owner", "agent-a"
+        )
+        self.assertEqual(owner_release.returncode, 0, owner_release.stderr)
+        self.assertFalse(lock.exists())
+
+    def test_force_release_warns_and_removes_another_owners_claim(self):
+        self.init_project_with_item()
+        claimed = self.run_cli(
+            "claim", "rr-001", "--root", str(self.project), "--owner", "agent-a"
+        )
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+
+        released = self.run_cli(
+            "release",
+            "rr-001",
+            "--root",
+            str(self.project),
+            "--owner",
+            "agent-b",
+            "--force",
+        )
+
+        self.assertEqual(released.returncode, 0, released.stderr)
+        self.assertIn("warning", released.stderr.lower())
+        self.assertFalse(
+            (self.project / ".research-route" / "claims" / "rr-001.lock").exists()
+        )
+
+    def test_new_rejects_unsupported_type_and_mode_without_changing_counter(self):
+        self.init_project()
+
+        invalid_type = self.run_cli(
+            "new",
+            "--root",
+            str(self.project),
+            "--title",
+            "Invalid",
+            "--type",
+            "note",
+            "--mode",
+            "light",
+        )
+        invalid_mode = self.run_cli(
+            "new",
+            "--root",
+            str(self.project),
+            "--title",
+            "Invalid",
+            "--type",
+            "question",
+            "--mode",
+            "medium",
+        )
+
+        self.assertNotEqual(invalid_type.returncode, 0)
+        self.assertNotEqual(invalid_mode.returncode, 0)
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 1)
+        self.assertEqual(list((self.project / "work-items").glob("rr-*.md")), [])
