@@ -1352,3 +1352,57 @@ class RouteCliTests(unittest.TestCase):
 
         self.assertIn("Generated at", handoff.read_text(encoding="utf-8"))
         self.assertEqual(manuscript.read_bytes(), manuscript_before)
+
+    def test_handoff_refuses_claim_id_that_differs_from_lock_filename(self):
+        self.init_project()
+        self.write_item("rr-001-item.md", "rr-001", [])
+        self.write_item("rr-002-item.md", "rr-002", [])
+        claims = self.project / ".research-route" / "claims"
+        claims.mkdir(parents=True)
+        claim = claims / "rr-001.lock"
+        claim.write_text(
+            '{"item_id": "rr-002", "owner": "agent-a"}\n', encoding="utf-8"
+        )
+        handoff = self.project / "HANDOFF.md"
+        handoff.chmod(0o640)
+        handoff_before = handoff.read_bytes()
+        mode_before = stat.S_IMODE(handoff.stat().st_mode)
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), handoff_before)
+        self.assertEqual(stat.S_IMODE(handoff.stat().st_mode), mode_before)
+
+    def test_handoff_refuses_claim_for_missing_work_item(self):
+        self.init_project()
+        claims = self.project / ".research-route" / "claims"
+        claims.mkdir(parents=True)
+        (claims / "rr-001.lock").write_text(
+            '{"item_id": "rr-001", "owner": "agent-a"}\n', encoding="utf-8"
+        )
+        handoff = self.project / "HANDOFF.md"
+        handoff.chmod(0o640)
+        handoff_before = handoff.read_bytes()
+        mode_before = stat.S_IMODE(handoff.stat().st_mode)
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), handoff_before)
+        self.assertEqual(stat.S_IMODE(handoff.stat().st_mode), mode_before)
+
+    def test_handoff_refuses_duplicate_work_item_ids(self):
+        self.init_project()
+        self.write_item("rr-001-first.md", "rr-001", [])
+        self.write_item("rr-001-second.md", "rr-001", [])
+        handoff = self.project / "HANDOFF.md"
+        handoff.chmod(0o640)
+        handoff_before = handoff.read_bytes()
+        mode_before = stat.S_IMODE(handoff.stat().st_mode)
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.read_bytes(), handoff_before)
+        self.assertEqual(stat.S_IMODE(handoff.stat().st_mode), mode_before)

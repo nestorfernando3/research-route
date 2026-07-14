@@ -436,6 +436,36 @@ def _claim_record_errors(claim: object) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def _claim_identity_errors(
+    claim: dict[str, object], filename_id: str
+) -> tuple[tuple[str, str], ...]:
+    claimed_id = claim.get("item_id")
+    if claimed_id == filename_id:
+        return ()
+    return (
+        (
+            "claim-mismatch",
+            f"claim item_id {claimed_id!r} does not match {filename_id!r}",
+        ),
+    )
+
+
+def _claim_reference_errors(
+    claim: dict[str, object], filename_id: str, known_ids: set[str]
+) -> tuple[tuple[str, str], ...]:
+    referenced_ids = {filename_id}
+    claimed_id = claim.get("item_id")
+    if isinstance(claimed_id, str):
+        referenced_ids.add(claimed_id)
+    return tuple(
+        (
+            "orphan-claim",
+            f"claim references missing work item: {item_id}",
+        )
+        for item_id in sorted(referenced_ids - known_ids)
+    )
+
+
 def _work_item_record_errors(
     metadata: dict[str, object],
 ) -> tuple[tuple[str, str], ...]:
@@ -479,6 +509,25 @@ def _work_item_record_errors(
             ("invalid-field", "depends_on must be a list of work-item IDs")
         )
     return tuple(errors)
+
+
+def _duplicate_item_issues(
+    root: Path, items_by_id: dict[str, list[Path]]
+) -> tuple[ValidationIssue, ...]:
+    issues: list[ValidationIssue] = []
+    for item_id, paths in sorted(items_by_id.items()):
+        if len(paths) < 2:
+            continue
+        names = ", ".join(_relative_path(root, path) for path in paths)
+        issues.extend(
+            ValidationIssue(
+                "duplicate-id",
+                _relative_path(root, path),
+                f"work-item id {item_id} is duplicated in: {names}",
+            )
+            for path in paths
+        )
+    return tuple(issues)
 
 
 def _dependency_cycles(graph: dict[str, list[str]]) -> list[tuple[str, ...]]:
@@ -727,17 +776,7 @@ def validate_route(root: Path) -> list[ValidationIssue]:
             ):
                 dependencies_by_id.setdefault(item_id, []).extend(dependencies)
 
-    for item_id, paths in sorted(items_by_id.items()):
-        if len(paths) > 1:
-            names = ", ".join(_relative_path(root, path) for path in paths)
-            for path in paths:
-                issues.append(
-                    ValidationIssue(
-                        "duplicate-id",
-                        _relative_path(root, path),
-                        f"work-item id {item_id} is duplicated in: {names}",
-                    )
-                )
+    issues.extend(_duplicate_item_issues(root, items_by_id))
     known_ids = set(items_by_id)
     for item_id, dependencies in sorted(dependencies_by_id.items()):
         for dependency in sorted(set(dependencies) - known_ids):
@@ -782,27 +821,16 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 issues.append(ValidationIssue("invalid-claim", relative_path, message))
             if not isinstance(claim, dict):
                 continue
-            claimed_id = claim.get("item_id")
-            if claimed_id != filename_id:
-                issues.append(
-                    ValidationIssue(
-                        "claim-mismatch",
-                        relative_path,
-                        f"claim item_id {claimed_id!r} does not match {filename_id!r}",
-                    )
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in _claim_identity_errors(claim, filename_id)
+            )
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in _claim_reference_errors(
+                    claim, filename_id, known_ids
                 )
-            referenced_ids = {filename_id}
-            if isinstance(claimed_id, str):
-                referenced_ids.add(claimed_id)
-            for item_id in referenced_ids:
-                if item_id not in known_ids:
-                    issues.append(
-                        ValidationIssue(
-                            "orphan-claim",
-                            relative_path,
-                            f"claim references missing work item: {item_id}",
-                        )
-                    )
+            )
     _validate_markdown_links(root, issues)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
@@ -848,6 +876,7 @@ def scaffold_handoff(root: Path) -> Path:
     _, suffix = remainder.split(HANDOFF_END, 1)
 
     items: list[dict[str, object]] = []
+    items_by_id: dict[str, list[Path]] = {}
     work_items = _require_directory(root / "work-items")
     for path in sorted(work_items.glob("*.md")):
         if path.is_symlink():
@@ -859,7 +888,14 @@ def scaffold_handoff(root: Path) -> Path:
         if record_errors:
             raise ValueError(f"invalid work item {path}: {record_errors[0][1]}")
         items.append(item_metadata)
+        item_id = item_metadata["id"]
+        assert isinstance(item_id, str)
+        items_by_id.setdefault(item_id, []).append(path)
 
+    duplicate_issues = _duplicate_item_issues(root, items_by_id)
+    if duplicate_issues:
+        raise ValueError(f"ambiguous work items: {duplicate_issues[0].message}")
+    known_ids = set(items_by_id)
     active_claims: list[str] = []
     claimed_ids: set[object] = set()
     claims = root / ".research-route" / "claims"
@@ -873,6 +909,12 @@ def scaffold_handoff(root: Path) -> Path:
             if claim_errors:
                 raise ValueError(f"invalid claim {path}: {claim_errors[0]}")
             assert isinstance(claim, dict)
+            identity_errors = _claim_identity_errors(claim, path.stem)
+            if identity_errors:
+                raise ValueError(f"invalid claim {path}: {identity_errors[0][1]}")
+            reference_errors = _claim_reference_errors(claim, path.stem, known_ids)
+            if reference_errors:
+                raise ValueError(f"invalid claim {path}: {reference_errors[0][1]}")
             claimed_ids.add(claim.get("item_id"))
             active_claims.append(
                 f"- {claim.get('item_id')}: {claim.get('owner')}"
