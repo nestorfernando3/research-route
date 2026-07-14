@@ -827,3 +827,96 @@ class RouteCliTests(unittest.TestCase):
         self.assertGreaterEqual(
             sum(issue.code == "invalid-field" for issue in issues), 5
         )
+
+    def test_validate_reports_null_required_enums(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        route_metadata, route_body = ROUTE_CLI.parse_frontmatter(route)
+        route_metadata["current_cycle"] = None
+        ROUTE_CLI.write_frontmatter(route, route_metadata, route_body)
+        item = self.write_item("rr-001-item.md", "rr-001", [])
+        item_metadata, item_body = ROUTE_CLI.parse_frontmatter(item)
+        for field in ("type", "status", "mode"):
+            item_metadata[field] = None
+        ROUTE_CLI.write_frontmatter(item, item_metadata, item_body)
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        enum_messages = {
+            issue.message for issue in issues if issue.code == "invalid-enum"
+        }
+
+        self.assertEqual(
+            enum_messages,
+            {
+                "unsupported current_cycle: None",
+                "unsupported type: None",
+                "unsupported status: None",
+                "unsupported mode: None",
+            },
+        )
+
+    def test_validate_handles_a_1200_item_acyclic_dependency_chain(self):
+        self.init_project()
+        for index in range(1, 1201):
+            item_id = f"rr-{index:04d}"
+            dependency = [f"rr-{index + 1:04d}"] if index < 1200 else []
+            self.write_item(f"{item_id}-item.md", item_id, dependency)
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertNotIn("dependency-cycle", {issue.code for issue in issues})
+
+    def test_validate_reports_a_1200_item_cycle_as_valid_json(self):
+        self.init_project()
+        for index in range(1, 1201):
+            item_id = f"rr-{index:04d}"
+            dependency = (
+                [f"rr-{index + 1:04d}"] if index < 1200 else ["rr-0001"]
+            )
+            self.write_item(f"{item_id}-item.md", item_id, dependency)
+
+        result = self.run_cli("validate", "--root", str(self.project), "--json")
+        issues = json.loads(result.stdout)
+
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(issues), 1200)
+        self.assertTrue(all(issue["code"] == "dependency-cycle" for issue in issues))
+        self.assertEqual(
+            issues,
+            sorted(
+                issues,
+                key=lambda issue: (issue["path"], issue["code"], issue["message"]),
+            ),
+        )
+
+    def test_validate_reports_broken_reference_style_markdown_link(self):
+        self.init_project()
+        (self.project / "CLAIMS.md").write_text(
+            "[missing][src]\n\n[src]: sources/missing.md\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        broken = [issue for issue in issues if issue.code == "broken-link"]
+
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0].path, "CLAIMS.md")
+        self.assertIn("sources/missing.md", broken[0].message)
+
+    def test_validate_accepts_valid_and_ignored_reference_style_links(self):
+        self.init_project()
+        (self.project / "sources" / "present.md").write_text(
+            "# Present\n", encoding="utf-8"
+        )
+        (self.project / "CLAIMS.md").write_text(
+            "[present][local] [web][external] [mail][email] [section][fragment]\n\n"
+            "[local]: sources/present.md\n"
+            "[external]: https://example.com/source\n"
+            "[email]: mailto:editor@example.com\n"
+            "[fragment]: #claims\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+
+        self.assertEqual(issues, [])

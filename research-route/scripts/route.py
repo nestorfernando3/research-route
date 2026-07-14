@@ -73,6 +73,10 @@ ITEM_FIELDS = {
     "output",
 }
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+REFERENCE_LINK = re.compile(r"!?\[([^\]]+)\]\[([^\]]*)\]")
+REFERENCE_DEFINITION = re.compile(
+    r"(?m)^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(?:<([^>\n]+)>|(\S+))"
+)
 
 
 @dataclass(frozen=True)
@@ -385,28 +389,59 @@ def _missing_fields(
 
 def _dependency_cycles(graph: dict[str, list[str]]) -> list[tuple[str, ...]]:
     state: dict[str, int] = {}
-    stack: list[str] = []
     cycles: set[tuple[str, ...]] = set()
 
-    def visit(item_id: str) -> None:
+    for item_id in sorted(graph):
+        if state.get(item_id, 0) != 0:
+            continue
         state[item_id] = 1
-        stack.append(item_id)
-        for dependency in sorted(graph.get(item_id, [])):
+        path = [item_id]
+        positions = {item_id: 0}
+        frames: list[tuple[str, Iterator[str]]] = [
+            (item_id, iter(sorted(graph.get(item_id, []))))
+        ]
+        while frames:
+            current, dependencies = frames[-1]
+            try:
+                dependency = next(dependencies)
+            except StopIteration:
+                frames.pop()
+                path.pop()
+                positions.pop(current)
+                state[current] = 2
+                continue
             if dependency not in graph:
                 continue
-            if state.get(dependency, 0) == 0:
-                visit(dependency)
-            elif state.get(dependency) == 1:
-                cycle = stack[stack.index(dependency) :]
+            dependency_state = state.get(dependency, 0)
+            if dependency_state == 0:
+                state[dependency] = 1
+                positions[dependency] = len(path)
+                path.append(dependency)
+                frames.append(
+                    (dependency, iter(sorted(graph.get(dependency, []))))
+                )
+            elif dependency_state == 1:
+                cycle = path[positions[dependency] :]
                 smallest = min(range(len(cycle)), key=cycle.__getitem__)
                 cycles.add(tuple(cycle[smallest:] + cycle[:smallest]))
-        stack.pop()
-        state[item_id] = 2
-
-    for item_id in sorted(graph):
-        if state.get(item_id, 0) == 0:
-            visit(item_id)
     return sorted(cycles)
+
+
+def _reference_label(label: str) -> str:
+    return " ".join(label.split()).casefold()
+
+
+def _broken_markdown_target(path: Path, destination: str) -> bool:
+    lowered = destination.lower()
+    if (
+        not destination
+        or destination.startswith("#")
+        or lowered.startswith(("http:", "https:", "mailto:"))
+        or destination.startswith("/")
+    ):
+        return False
+    target_text = destination.partition("#")[0].partition("?")[0]
+    return bool(target_text and not (path.parent / target_text).exists())
 
 
 def _validate_markdown_links(
@@ -430,16 +465,33 @@ def _validate_markdown_links(
                 destination = destination[1 : destination.index(">")]
             else:
                 destination = destination.split(maxsplit=1)[0]
-            lowered = destination.lower()
-            if (
-                not destination
-                or destination.startswith("#")
-                or lowered.startswith(("http:", "https:", "mailto:"))
-                or destination.startswith("/")
-            ):
-                continue
-            target_text = destination.partition("#")[0].partition("?")[0]
-            if target_text and not (path.parent / target_text).exists():
+            if _broken_markdown_target(path, destination):
+                issues.append(
+                    ValidationIssue(
+                        "broken-link",
+                        _relative_path(root, path),
+                        f"relative link does not exist: {destination}",
+                    )
+                )
+        definitions: dict[str, str] = {}
+        for match in REFERENCE_DEFINITION.finditer(text):
+            label = _reference_label(match.group(1))
+            definitions.setdefault(label, match.group(2) or match.group(3))
+        references = {
+            _reference_label(match.group(2) or match.group(1))
+            for match in REFERENCE_LINK.finditer(text)
+        }
+        for label in sorted(references):
+            destination = definitions.get(label)
+            if destination is None:
+                issues.append(
+                    ValidationIssue(
+                        "broken-link",
+                        _relative_path(root, path),
+                        f"reference definition does not exist: {label}",
+                    )
+                )
+            elif _broken_markdown_target(path, destination):
                 issues.append(
                     ValidationIssue(
                         "broken-link",
@@ -517,7 +569,7 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                     )
                 )
             cycle = route_metadata.get("current_cycle")
-            if cycle is not None and (
+            if "current_cycle" in route_metadata and (
                 not isinstance(cycle, str) or cycle not in ALLOWED_CYCLES
             ):
                 issues.append(
@@ -605,7 +657,7 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 ("mode", ALLOWED_MODES),
             ):
                 value = metadata.get(field)
-                if value is not None and (
+                if field in metadata and (
                     not isinstance(value, str) or value not in allowed
                 ):
                     issues.append(
