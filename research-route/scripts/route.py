@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
+from typing import Iterator
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "assets" / "route-template"
@@ -92,17 +96,19 @@ def _format_scalar(value: object) -> str:
     raise ValueError(f"unsupported frontmatter value: {value!r}")
 
 
-def write_frontmatter(
-    path: Path, metadata: dict[str, object], body: str
-) -> None:
+def _frontmatter_text(metadata: dict[str, object], body: str = "") -> str:
     lines = ["---\n"]
     for key, value in metadata.items():
         if not FRONTMATTER_KEY.fullmatch(key):
             raise ValueError(f"invalid frontmatter key: {key!r}")
         lines.append(f"{key}: {_format_scalar(value)}\n")
-    lines.append("---\n")
-    lines.append(body)
+    lines.extend(("---\n", body))
+    return "".join(lines)
 
+
+def write_frontmatter(
+    path: Path, metadata: dict[str, object], body: str
+) -> None:
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -114,21 +120,11 @@ def write_frontmatter(
             delete=False,
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
-            temporary_file.write("".join(lines))
+            temporary_file.write(_frontmatter_text(metadata, body))
         temporary_path.replace(path)
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
-
-
-def _frontmatter_text(metadata: dict[str, object], body: str = "") -> str:
-    lines = ["---\n"]
-    for key, value in metadata.items():
-        if not FRONTMATTER_KEY.fullmatch(key):
-            raise ValueError(f"invalid frontmatter key: {key!r}")
-        lines.append(f"{key}: {_format_scalar(value)}\n")
-    lines.extend(("---\n", body))
-    return "".join(lines)
 
 
 def _require_route(root: Path) -> Path:
@@ -141,7 +137,9 @@ def _require_route(root: Path) -> Path:
 
 
 def _slugify(title: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    normalized = unicodedata.normalize("NFKD", title)
+    ascii_title = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_title.lower()).strip("-")
     if not slug:
         raise ValueError("title must contain a letter or number")
     return slug
@@ -154,9 +152,86 @@ def _validate_item_id(item_id: str) -> None:
 
 def _require_item(root: Path, item_id: str) -> None:
     _validate_item_id(item_id)
-    matches = list((root / "work-items").glob(f"{item_id}-*.md"))
+    work_items = _require_directory(root / "work-items")
+    matches = list(work_items.glob(f"{item_id}-*.md"))
     if len(matches) != 1:
         raise ValueError(f"work item not found: {item_id}")
+
+
+def _require_directory(path: Path, create: bool = False) -> Path:
+    if path.is_symlink():
+        raise ValueError(f"symlinked directory is not allowed: {path}")
+    if path.exists():
+        if not path.is_dir():
+            raise ValueError(f"expected directory: {path}")
+    elif create:
+        path.mkdir()
+    else:
+        raise ValueError(f"missing directory: {path}")
+    return path
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path) -> Iterator[None]:
+    if path.is_symlink():
+        raise ValueError(f"symlinked lock is not allowed: {path}")
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _write_exclusive(path: Path, content: str, mode: int) -> None:
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(content)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _reserve_item_id(
+    route: Path, work_items: Path, state_directory: Path
+) -> str:
+    allocations = _require_directory(
+        state_directory / "allocations", create=True
+    )
+    with _exclusive_file_lock(state_directory / "allocation.lock"):
+        route_metadata, route_body = parse_frontmatter(route)
+        counter = route_metadata.get("next_work_item")
+        if type(counter) is not int or counter < 1:
+            raise ValueError("ROUTE.md next_work_item must be a positive integer")
+
+        candidate = counter
+        while True:
+            item_id = f"rr-{candidate:03d}"
+            reservation = allocations / f"{item_id}.reserve"
+            existing_items = list(work_items.glob(f"{item_id}-*.md"))
+            if not reservation.exists() and not existing_items:
+                break
+            candidate += 1
+
+        _write_exclusive(
+            reservation,
+            json.dumps({"item_id": item_id}) + "\n",
+            0o600,
+        )
+        route_metadata["next_work_item"] = candidate + 1
+        write_frontmatter(route, route_metadata, route_body)
+        return item_id
+
+
+@contextmanager
+def _claim_guard(state_directory: Path, item_id: str) -> Iterator[None]:
+    with _exclusive_file_lock(state_directory / f"{item_id}.claim.guard"):
+        yield
 
 
 def new_work_item(
@@ -167,6 +242,7 @@ def new_work_item(
     dependencies: list[str],
 ) -> Path:
     route = _require_route(root)
+    work_items = _require_directory(root / "work-items")
     if item_type not in ALLOWED_ITEM_TYPES:
         raise ValueError(f"unsupported work-item type: {item_type}")
     if mode not in ALLOWED_MODES:
@@ -175,49 +251,22 @@ def new_work_item(
         _validate_item_id(dependency)
     slug = _slugify(title)
 
-    state_directory = root / ".research-route"
-    state_directory.mkdir(exist_ok=True)
-    counter_lock = state_directory / "counter.lock"
-    lock_descriptor = os.open(
-        counter_lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-    )
-    os.close(lock_descriptor)
-    item_path: Path | None = None
-    try:
-        route_metadata, route_body = parse_frontmatter(route)
-        counter = route_metadata.get("next_work_item")
-        if type(counter) is not int or counter < 1:
-            raise ValueError("ROUTE.md next_work_item must be a positive integer")
-        item_id = f"rr-{counter:03d}"
-        item_path = root / "work-items" / f"{item_id}-{slug}.md"
-        item_metadata: dict[str, object] = {
-            "id": item_id,
-            "title": title,
-            "schema_version": 1,
-            "type": item_type,
-            "status": "open",
-            "depends_on": dependencies,
-            "owner": None,
-            "mode": mode,
-            "output": None,
-        }
-        descriptor = os.open(item_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as item_file:
-                item_file.write(_frontmatter_text(item_metadata))
-        except Exception:
-            item_path.unlink(missing_ok=True)
-            raise
-
-        route_metadata["next_work_item"] = counter + 1
-        try:
-            write_frontmatter(route, route_metadata, route_body)
-        except Exception:
-            item_path.unlink(missing_ok=True)
-            raise
-        return item_path
-    finally:
-        counter_lock.unlink(missing_ok=True)
+    state_directory = _require_directory(root / ".research-route", create=True)
+    item_id = _reserve_item_id(route, work_items, state_directory)
+    item_path = work_items / f"{item_id}-{slug}.md"
+    item_metadata: dict[str, object] = {
+        "id": item_id,
+        "title": title,
+        "schema_version": 1,
+        "type": item_type,
+        "status": "open",
+        "depends_on": dependencies,
+        "owner": None,
+        "mode": mode,
+        "output": None,
+    }
+    _write_exclusive(item_path, _frontmatter_text(item_metadata), 0o644)
+    return item_path
 
 
 def claim_item(root: Path, item_id: str, owner: str) -> Path:
@@ -225,22 +274,16 @@ def claim_item(root: Path, item_id: str, owner: str) -> Path:
     _require_item(root, item_id)
     if not owner:
         raise ValueError("owner must not be empty")
-    claims = root / ".research-route" / "claims"
-    claims.mkdir(parents=True, exist_ok=True)
+    state_directory = _require_directory(root / ".research-route", create=True)
+    claims = _require_directory(state_directory / "claims", create=True)
     lock = claims / f"{item_id}.lock"
-    descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    try:
+    with _claim_guard(state_directory, item_id):
         claim = {
             "item_id": item_id,
             "owner": owner,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        with os.fdopen(descriptor, "w", encoding="utf-8") as claim_file:
-            json.dump(claim, claim_file)
-            claim_file.write("\n")
-    except Exception:
-        lock.unlink(missing_ok=True)
-        raise
+        _write_exclusive(lock, json.dumps(claim) + "\n", 0o600)
     return lock
 
 
@@ -251,15 +294,18 @@ def release_item(
     _validate_item_id(item_id)
     if not owner:
         raise ValueError("owner must not be empty")
-    lock = root / ".research-route" / "claims" / f"{item_id}.lock"
-    try:
-        claim = json.loads(lock.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise ValueError(f"work item is not claimed: {item_id}") from None
-    if not isinstance(claim, dict) or claim.get("owner") != owner and not force:
-        claimed_by = claim.get("owner") if isinstance(claim, dict) else "unknown"
-        raise ValueError(f"claim belongs to {claimed_by}, not {owner}")
-    lock.unlink()
+    state_directory = _require_directory(root / ".research-route")
+    claims = _require_directory(state_directory / "claims")
+    lock = claims / f"{item_id}.lock"
+    with _claim_guard(state_directory, item_id):
+        try:
+            claim = json.loads(lock.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise ValueError(f"work item is not claimed: {item_id}") from None
+        if not isinstance(claim, dict) or claim.get("owner") != owner and not force:
+            claimed_by = claim.get("owner") if isinstance(claim, dict) else "unknown"
+            raise ValueError(f"claim belongs to {claimed_by}, not {owner}")
+        lock.unlink()
 
 
 def init_route(destination: Path, title: str, language: str) -> Path:

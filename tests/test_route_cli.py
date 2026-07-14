@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, wait
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -338,3 +341,188 @@ class RouteCliTests(unittest.TestCase):
         route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
         self.assertEqual(route_metadata["next_work_item"], 1)
         self.assertEqual(list((self.project / "work-items").glob("rr-*.md")), [])
+
+    def test_new_transliterates_spanish_titles_without_changing_frontmatter(self):
+        self.init_project()
+
+        first = ROUTE_CLI.new_work_item(
+            self.project, "Ética pública", "question", "light", []
+        )
+        second = ROUTE_CLI.new_work_item(
+            self.project, "Niñez", "writing", "deep", []
+        )
+
+        self.assertEqual(first.name, "rr-001-etica-publica.md")
+        self.assertEqual(second.name, "rr-002-ninez.md")
+        first_metadata, _ = ROUTE_CLI.parse_frontmatter(first)
+        second_metadata, _ = ROUTE_CLI.parse_frontmatter(second)
+        self.assertEqual(first_metadata["title"], "Ética pública")
+        self.assertEqual(second_metadata["title"], "Niñez")
+
+    def test_new_skips_interrupted_reservation_and_advances_counter(self):
+        self.init_project()
+        reservations = self.project / ".research-route" / "allocations"
+        reservations.mkdir(parents=True)
+        (reservations / "rr-001.reserve").write_text(
+            '{"item_id": "rr-001"}\n', encoding="utf-8"
+        )
+
+        item = ROUTE_CLI.new_work_item(
+            self.project, "Recovered allocation", "audit", "light", []
+        )
+
+        self.assertEqual(item.name, "rr-002-recovered-allocation.md")
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 3)
+        self.assertTrue((reservations / "rr-002.reserve").exists())
+
+    def test_new_ignores_stale_legacy_counter_lock(self):
+        self.init_project()
+        state = self.project / ".research-route"
+        state.mkdir()
+        stale_lock = state / "counter.lock"
+        stale_lock.write_text("abandoned\n", encoding="utf-8")
+
+        item = ROUTE_CLI.new_work_item(
+            self.project, "After old crash", "audit", "light", []
+        )
+
+        self.assertEqual(item.name, "rr-001-after-old-crash.md")
+        self.assertEqual(stale_lock.read_text(encoding="utf-8"), "abandoned\n")
+
+    def test_concurrent_new_calls_allocate_distinct_stable_ids(self):
+        self.init_project()
+        first_at_route_write = threading.Event()
+        allow_first_write = threading.Event()
+        original_write = ROUTE_CLI.write_frontmatter
+
+        def delayed_write(path, metadata, body):
+            if (
+                path == self.project / "ROUTE.md"
+                and threading.current_thread().name == "allocation_0"
+            ):
+                first_at_route_write.set()
+                self.assertTrue(allow_first_write.wait(2))
+            return original_write(path, metadata, body)
+
+        with mock.patch.object(ROUTE_CLI, "write_frontmatter", delayed_write):
+            with ThreadPoolExecutor(
+                max_workers=2, thread_name_prefix="allocation"
+            ) as executor:
+                first = executor.submit(
+                    ROUTE_CLI.new_work_item,
+                    self.project,
+                    "First concurrent item",
+                    "source",
+                    "light",
+                    [],
+                )
+                self.assertTrue(first_at_route_write.wait(2))
+                second = executor.submit(
+                    ROUTE_CLI.new_work_item,
+                    self.project,
+                    "Second concurrent item",
+                    "source",
+                    "light",
+                    [],
+                )
+                wait([second], timeout=0.2)
+                allow_first_write.set()
+                paths = [first.result(timeout=2), second.result(timeout=2)]
+
+        self.assertEqual({path.name[:6] for path in paths}, {"rr-001", "rr-002"})
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 3)
+
+    def test_release_guard_prevents_deleting_a_replacement_claim(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        lock = self.project / ".research-route" / "claims" / "rr-001.lock"
+        release_has_read = threading.Event()
+        allow_release = threading.Event()
+        replacement_finished = threading.Event()
+        original_read_text = Path.read_text
+
+        def delayed_read_text(path, *args, **kwargs):
+            text = original_read_text(path, *args, **kwargs)
+            if path == lock and threading.current_thread().name == "releaser":
+                release_has_read.set()
+                self.assertTrue(allow_release.wait(2))
+            return text
+
+        release_error: list[Exception] = []
+
+        def release_old_claim() -> None:
+            try:
+                ROUTE_CLI.release_item(self.project, "rr-001", "agent-a")
+            except Exception as error:
+                release_error.append(error)
+
+        def create_replacement() -> None:
+            ROUTE_CLI.claim_item(self.project, "rr-001", "agent-c")
+            replacement_finished.set()
+
+        with mock.patch.object(Path, "read_text", delayed_read_text):
+            releaser = threading.Thread(target=release_old_claim, name="releaser")
+            releaser.start()
+            self.assertTrue(release_has_read.wait(2))
+            lock.unlink()
+            replacement = threading.Thread(target=create_replacement)
+            replacement.start()
+            finished_during_release = replacement_finished.wait(0.2)
+            allow_release.set()
+            releaser.join(2)
+            replacement.join(2)
+
+        self.assertFalse(finished_during_release)
+        self.assertFalse(releaser.is_alive())
+        self.assertFalse(replacement.is_alive())
+        self.assertTrue(release_error)
+        claim = json.loads(lock.read_text(encoding="utf-8"))
+        self.assertEqual(claim["owner"], "agent-c")
+
+    def test_new_rejects_symlinked_work_items_without_touching_target(self):
+        self.init_project()
+        external = Path(self.temporary_directory.name) / "external-work-items"
+        external.mkdir()
+        shutil.rmtree(self.project / "work-items")
+        (self.project / "work-items").symlink_to(external, target_is_directory=True)
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.new_work_item(
+                self.project, "Escaping item", "question", "light", []
+            )
+
+        self.assertEqual(list(external.iterdir()), [])
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 1)
+
+    def test_new_rejects_symlinked_state_directory_without_touching_target(self):
+        self.init_project()
+        external = Path(self.temporary_directory.name) / "external-state"
+        external.mkdir()
+        (self.project / ".research-route").symlink_to(
+            external, target_is_directory=True
+        )
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.new_work_item(
+                self.project, "Escaping state", "question", "light", []
+            )
+
+        self.assertEqual(list(external.iterdir()), [])
+        route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
+        self.assertEqual(route_metadata["next_work_item"], 1)
+
+    def test_claim_rejects_symlinked_claims_without_touching_target(self):
+        self.init_project_with_item()
+        external = Path(self.temporary_directory.name) / "external-claims"
+        external.mkdir()
+        claims = self.project / ".research-route" / "claims"
+        claims.parent.mkdir(exist_ok=True)
+        claims.symlink_to(external, target_is_directory=True)
+
+        with self.assertRaises(ValueError):
+            ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        self.assertEqual(list(external.iterdir()), [])
