@@ -1,36 +1,19 @@
-Applied `$research-route` as a publication-bound bilingual revision.
+Using `research-route`, I would perform a source-aligned terminology pass now—not a global replacement.
 
-### Work to perform now
+| Concept ID | Spanish | English | Definition | Thesis impact/link | Claim link | Evidence link | Inference link | Exceptions | Avoid | Status |
+|---|---|---|---|---|---|---|---|---|---|---|
+| TERM-01 | cuidado | care | Ongoing relational practice sustained over time | `pending real ID`: restores the thesis’s continuous relational pole | `pending real ID`: temporality, reciprocity, and sustained obligation claims | `pending real ID`: passages where *cuidado* evidences an enduring relation | `pending real ID`: duration or reciprocity may support care, not merely an isolated act | Field-specific compounds | attention, service | Proposed; researcher approval required |
+| TERM-02 | atención | attention | Bounded act of noticing, attending, or responding | `pending real ID`: restores the bounded counterpart to care | `pending real ID`: event-level noticing or response claims | `pending real ID`: passages where *atención* evidences a discrete act | `pending real ID`: an isolated act does not establish an ongoing caring relation | Use *service* for actual service provision; *attentiveness* only for a disposition | care as default | Proposed; researcher approval required |
+| TERM-03 | cuidado/atención overlap | retain for review | A passage deliberately joins or destabilizes the distinction | `pending real ID`: may qualify rather than merely illustrate the thesis | `pending real ID`: possible overlap claim | `pending real ID`: aligned Spanish passage required | `pending real ID`: no binary inference until context is reviewed | Conceptually hybrid passages | forced uniformity | Researcher decision required |
 
-Use a source-aligned terminology pass, not a global replacement:
+I would align every English occurrence of “care” with its Spanish source, apply `cuidado → care` and `atención → attention` in clear cases, and flag only service, disposition, and hybrid cases. Then I would propagate the distinction through the title, abstract, thesis, definitions, topic sentences, keywords, and conclusion while preserving the Spanish voice’s density, restraint, cadence, and purposeful repetition.
 
-| Concept ID | Spanish term | Provisional English | Definition / distinction | Context exceptions | Avoid | Status |
-|---|---|---|---|---|---|---|
-| TERM-01 | cuidado | care | Ongoing relational practice sustained over time | Compounds may require a field-specific equivalent | attention, service | Researcher-authored distinction; English wording pending approval |
-| TERM-02 | atención | attention | Bounded act of noticing, attending to, or responding | Use *service* only when the passage specifically denotes service provision; *attentiveness* only for a disposition | care as default | Provisional; classify by function |
-| TERM-03 | cuidado/atención hybrid | retain for review | Passage deliberately moves between practice and act | No automatic resolution | forced uniformity | Researcher decision required |
+No external project root or drafts were supplied, so persistence awaits a project destination. I would persist:
 
-I would align the drafts and classify every English occurrence of “care” against the Spanish source:
+- `DECISIONS.md`: The care/attention distinction is argument-bearing; English terms remain proposed until researcher approval.
+- `manuscript/VOICE.md`: Preserve dense, restrained, rhythmic prose; do not smooth defined repetition into generic synonyms.
+- `INQUIRY.md`: Record every hybrid, service-specific, or disposition-specific occurrence.
+- `ROUTE.md`: Add deep-rigor item “Bilingual terminology propagation”; close when all occurrences are classified, exceptions approved, and thesis-bearing sections agree.
+- `HANDOFF.md`: No blanket replacement is authorized; resume from the aligned concordance and preserve exception flags.
 
-- `cuidado` → normally **care**
-- `atención` → normally **attention**
-- service-delivery meaning → consider **service** or **assistance**
-- dispositional meaning → consider **attentiveness**
-- passages that exploit both concepts → flag rather than normalize
-
-Then I would propagate the distinction through the title, abstract, thesis, topic sentences, keywords, conclusion, and any definitions. The English revision should preserve the Spanish draft’s conceptual density, restraint, cadence, and purposeful repetition; it should not simplify the prose merely to sound conventionally Anglophone.
-
-### Proposed project-state updates
-
-No external project root or drafts were available, so persistence awaits an external project destination. I would record:
-
-- `DECISIONS.md`: The distinction between ongoing relational **care** and bounded **attention** is argument-bearing, not stylistic. Status: proposed until the researcher approves the exact English formulation.
-- `manuscript/VOICE.md`: Preserve dense, restrained, rhythmic prose; avoid generic smoothing and unnecessary synonym variation around defined terms.
-- `INQUIRY.md`: List hybrid or institutionally specific uses of *atención* requiring contextual judgment.
-- `ROUTE.md`: Add a deep-rigor writing item, “Bilingual terminology propagation,” because mistranslation currently erases the central contribution. Closure condition: every occurrence is classified, exceptions are resolved, and the distinction is consistent in the thesis-bearing sections.
-- `HANDOFF.md`: Note that no blanket `care → attention` replacement is authorized; the next agent must work from the aligned Spanish source and preserve exception flags.
-- Link TERM-01 and TERM-02 to the actual thesis, claim, evidence, and inference IDs once those artifacts are accessible.
-
-### Exact next action
-
-Create an aligned concordance of every English “care” with its Spanish source occurrence, apply the two default mappings above, and return only the hybrid/exception cases to the researcher for approval before polishing the English prose.
+Exact next action: create the Spanish–English concordance for every English “care,” apply the two clear mappings, and send only the flagged exceptions plus the proposed ledger terms to the researcher for approval.

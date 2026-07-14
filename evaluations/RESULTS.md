@@ -38,7 +38,7 @@ Baseline median: **10.5 / 20**.
 | Bilingual drift was repaired lexically, but terminology was not linked to claims, evidence, or thesis consequences. | Positive bilingual voice and terminology-ledger recipe with argument-unit links and escalation conditions. | `research-route/references/writing-and-review.md` → “Build a bilingual voice profile” and “Draft argument units”; `research-route/SKILL.md` → “Observed omissions → required recipe.” | Each Spanish-English decision records the distinction, affected claim/evidence, context exceptions, and owner; thesis-changing or hybrid cases return to the researcher. |
 | GREEN agents invented `CONTRADICTIONS.md`, `FOG.md`, literal source-key placeholders, and project roots inside the installed skill package. | Positive canonical-artifact and external-root recipe, plus real source-key allocation. | `research-route/SKILL.md` → “Start or resume” and “Persist and close”; `research-route/references/research-and-claims.md` → “Record access and sources.” | Contradictions/fog go to `INQUIRY.md`; no parallel state files or literal placeholder paths appear; projects are never initialized inside the skill package. |
 | The first root-safety refactor made directory selection the immediate action and displaced higher-value intellectual work. | Treat the external root as a persistence prerequisite while retaining the highest-value safe intellectual task as the exact next action. | `research-route/SKILL.md` → “Start or resume.” | Agents decline unsafe persistence but still advance the contribution, evidence, privacy, or terminology decision immediately. |
-| A bilingual rerun omitted claim/evidence links from the returned terminology ledger. | Require links to be visible in the returned ledger as well as persisted state. | `research-route/SKILL.md` → “Observed omissions → required recipe.” | Returned terminology entries expose their thesis, claim, evidence, and inference consequences or state exactly which real IDs must be linked once the project is available. |
+| A bilingual rerun omitted claim/evidence links from the returned terminology ledger; a later run deferred all links without describing their effects. | Require separate thesis-impact, claim, evidence, and inference fields in the returned ledger. When real IDs are unavailable, each `pending real ID` must include its concrete consequence. | `research-route/SKILL.md` → “Observed omissions → required recipe”; `research-route/references/writing-and-review.md` → “Build a bilingual voice profile.” | Returned terminology entries expose concrete thesis, claim, evidence, and inference consequences even before real IDs can be allocated. |
 
 ## Green run
 
@@ -51,7 +51,7 @@ Selected final raw outputs are the six unsuffixed files in `green/`; all superse
 | [Inaccessible source](green/inaccessible-source.md) | 4 | 14 | +5 | No | Refuses fabrication, limits use to abstract-level evidence, avoids a placeholder source key, records canonical consequences, and chooses obtain-or-replace as the substantive next action. |
 | [Venue mismatch](green/venue-mismatch.md) | 1 | 17 | +6 | No | Preserves the stabilized contribution, keeps the fallback provisional, requires a stratified ten-full-text fingerprint plus current policies, states closure, and retains researcher approval. |
 | [Private profile handoff](green/private-profile-handoff.md) | 3 | 17 | +7 | No | Excludes private material, transfers only the authorized statement, keeps manuscript wording behind a second checkpoint, and compares three rival framings before thesis formation. |
-| [Bilingual drift](green/bilingual-drift.md) | 4 | 16 | +6 | No | Restores the conceptual distinction through a source-aligned ledger, preserves voice, escalates hybrids, propagates through thesis-bearing sections, and leaves an efficient concordance action. |
+| [Bilingual drift](green/bilingual-drift.md) | 6 | 16 | +6 | No | Restores the distinction through a source-aligned ledger with separate, concrete thesis, claim, evidence, and inference consequences; preserves voice, escalates hybrids, and leaves an efficient concordance action. |
 
 Manual dimension audit in rubric order:
 
@@ -64,7 +64,7 @@ Manual dimension audit in rubric order:
 | Private profile | 1/2/2/2/1/2/2/1/2/2 | 17 |
 | Bilingual drift | 1/2/1/2/1/2/1/2/2/2 | 16 |
 
-Superseded GREEN raw-output scores: humanities 16 → 16 → **17**; social science 14 → 15 → 15 → **16**; inaccessible source 13 → 14 → 14 → **14**; private profile 14 → 15 → **17**; bilingual drift 15 → 16 → 15 → **16**. Venue required no rerun and scored **17**.
+Superseded GREEN raw-output scores: humanities 16 → 16 → **17**; social science 14 → 15 → 15 → **16**; inaccessible source 13 → 14 → 14 → **14**; private profile 14 → 15 → **17**; bilingual drift 15 → 16 → 15 → 16 → **16**. Venue required no rerun and scored **17**.
 
 Final GREEN median: **16.5 / 20**, exceeding the baseline median by **6.0 points**. Every selected GREEN score improved on baseline and no critical failure was observed.
 

@@ -18,10 +18,10 @@ Treat translation as intellectual revision. Preserve distinctions, entailments, 
 Maintain a terminology ledger:
 
 ```markdown
-| Concept ID | Spanish term | English term | Definition / distinction | Claim and evidence links | Context exceptions | Avoid | Decision owner/status |
+| Concept ID | Spanish term | English term | Definition / distinction | Thesis impact/link | Claim link | Evidence link | Inference link | Context exceptions | Avoid | Decision owner/status |
 ```
 
-Resolve each occurrence by function and context. A bilingual consistency check is incomplete until terminology decisions are traced to affected claims and evidence, not merely made uniform.
+Resolve each occurrence by function and context. A bilingual consistency check is incomplete until terminology decisions are traced to affected thesis, claims, evidence, and inference, not merely made uniform. Without an external project root or real IDs, use `pending real ID` only beside a concrete description of what the term changes in each affected thesis, claim, evidence use, or inference.
 
 Human voice comes from situated reasoning and authorized stylistic choices, not artificial errors or detector evasion. Never add mistakes, awkwardness, false personal detail, or random variation to appear human. Do not imitate sources or optimize for an AI detector; make reasoning, evidence, and authorial decisions genuinely owned and independently reviewable.
 
