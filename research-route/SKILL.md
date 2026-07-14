@@ -27,6 +27,7 @@ Set `<skill-dir>` to this skill's directory and `<root>` to the research-project
    ```
 
 4. Confirm one primary intellectual objective for the session and whether its output is exploratory or publication-bound.
+5. Before collecting, accessing, recording, transmitting, scraping, or analyzing participants, personal data, sensitive archives or corpora, Indigenous or community-governed material, protected or copyrighted material, or restricted sources, run the early ethics gate in [research-and-claims.md](references/research-and-claims.md). Block the work until applicable consent or ethics review, permissions and community/archive terms, storage and security, and AI-tool transmission conditions are recorded and satisfied.
 
 ## Cover the route
 
@@ -47,7 +48,7 @@ Obtain explicit researcher approval at every mandatory checkpoint:
 - first defensible contribution statement;
 - consequential method, corpus, or interpretive strategy;
 - stabilized central thesis;
-- any proposed conversion of private profile material into publishable reflexive positioning: first require explicit, versioned relabeling to `publishable`, then approve the exact manuscript wording; while labeled `private`, it remains excluded;
+- any proposed conversion of private profile material into publishable reflexive positioning: the researcher must first relabel it locally and supply only the newly `publishable` content, then approve the exact manuscript wording; while labeled `private`, a hosted or external agent never reads it;
 - version proposed for submission.
 
 Between checkpoints, proceed autonomously only with reversible work inside the approved scope. Record the decision, concise rationale, residual uncertainty, and reopening condition in the canonical project state.
@@ -96,11 +97,16 @@ Leave the exact next action and why it has highest value. Exclude private profil
 - Read [research-and-claims.md](references/research-and-claims.md) for searches, source cards, access, claims, contribution testing, adversarial work, rigor, or stopping.
 - Read [writing-and-review.md](references/writing-and-review.md) for bilingual voice, terminology, drafting, revision, review simulation, ethics audit, or submission artifacts.
 
-## Counter observed RED rationalizations
+## Respond to observed RED
+
+Use prohibition plus a concrete counter only for genuine discipline risks:
 
 - **“The abstract makes the missing quotation reconstructable.”** No. Never fabricate or silently complete references, DOI, pages, quotations, findings, data, source content, or unseen full text. Record the access block, use only what the inspected access level supports, and obtain the source or replace it.
-- **“Approved private material may be published later if useful.”** No. `private`, `operational`, and `publishable` are separate permissions. While content is labeled `private`, exclude it categorically. Publication requires explicit, versioned relabeling to `publishable` and then a separate checkpoint on the exact contextualized wording; hand off only authorized operational guidance.
-- **“The evidence clearly changes the thesis, so the agent can install the replacement.”** Propose and test the revision, then retain the thesis checkpoint. Research effort already spent is not evidence.
-- **“A promising venue candidate can become the target now.”** Compare target and fallback using a complete fingerprint, then retain researcher approval for the consequential venue decision.
-- **“Nearby literature is enough to state the contribution.”** Test nearest neighbors, the strongest rival interpretation, simpler explanations, adverse evidence, and a stopping condition before asking for contribution approval.
-- **“A terminology choice is only stylistic.”** Link bilingual terminology to the claim, evidence, inference, and thesis consequences it governs; escalate conceptually hybrid cases to the researcher.
+- **“The next agent needs the private story.”** No. A hosted or external agent never receives `private` answers. The researcher self-records them locally and supplies only a researcher-authored, authorized operational consequence. A truly local/offline harness may process private material only with explicit authorization and must exclude it from handoff and manuscript.
+
+### Observed omissions → required recipe
+
+- **Consequential checkpoint omitted:** keep the replacement thesis, target venue, contribution, method/corpus/interpretive strategy, reflexive positioning, or submission version proposed until the corresponding researcher approval is recorded.
+- **Contribution opposition omitted:** test nearest neighbors, the strongest rival interpretation, simpler explanations, and adverse evidence before asking for contribution approval.
+- **Stopping condition omitted:** state what evidence would close, narrow, or block comparison, search, or transformation work; a time box ends activity, not uncertainty.
+- **Bilingual propagation omitted:** link every consequential term decision to affected claims, evidence, inference, and thesis consequences; escalate conceptually hybrid cases to the researcher.

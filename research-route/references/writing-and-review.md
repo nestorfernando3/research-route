@@ -70,9 +70,9 @@ Run three independent simulations. Each must cite manuscript locations and retur
 
 Triage responses: correct factual, source, methodological, logical, and ethical faults; negotiate scope-expanding or restructuring requests against the approved contribution; respectfully explain non-adoption when a request rests on a misunderstanding, conflicts with stronger evidence, or would make the paper less honest. For actual peer review, maintain a point-by-point response linking each comment to the change and location.
 
-## Ethics and current-policy review
+## Ethics and current-policy recheck
 
-Before publication-bound output, check applicable consent or ethics review, participant and profile privacy, sensitive or restricted material, data/code/material handling, quotation and image rights, conflicts, funding, authorship and contributor approval, reproducibility or interpretive transparency, and disclosure of relevant tool assistance. Verify current journal, institution, archive, community, and funder rules from authoritative sources when applicable. Record the source and date; policies change, so do not rely on remembered universal claims.
+Before publication-bound output, recheck the early ethics decision from `DECISIONS.md`; this is not the first ethics gate. Confirm that the final use still fits applicable consent or ethics review, community/archive governance, participant and profile privacy, access permissions, sensitive or restricted material controls, storage and AI-tool transmission limits, quotation and image rights, conflicts, funding, authorship and contributor approval, reproducibility or interpretive transparency, and disclosure of relevant tool assistance. If the material, purpose, tool, audience, or risk changed, reopen the gate before continuing. Verify current journal, institution, archive, community, and funder rules from authoritative sources when applicable. Record the source and date; policies change, so do not rely on remembered universal claims.
 
 An agent or language model is not a substitute for accountable authorship. The researcher must inspect, correct, approve, and take responsibility for the submitted work. Verify every citation, identifier, quotation, locator, number, named fact, and generated analysis against authoritative or primary material.
 
@@ -90,4 +90,4 @@ Prepare and cross-check:
 - current submission checklist, anonymization, file, length, and metadata requirements;
 - final researcher approval of the exact version proposed for submission.
 
-Finish only after the three review simulations, ethics/current-policy review, reference and artifact cross-check, route validation, and submission-version checkpoint are complete or explicitly recorded as blocked.
+Finish only after the three review simulations, ethics/current-policy recheck, reference and artifact cross-check, route validation, and submission-version checkpoint are complete or explicitly recorded as blocked.

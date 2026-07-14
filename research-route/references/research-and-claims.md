@@ -2,6 +2,19 @@
 
 Make every search answer a decision, every source use respect its inspected access level, and every manuscript claim expose its evidence and inference.
 
+## Pass the early ethics gate
+
+Before collecting, accessing, recording, transmitting, scraping, or analyzing participants, personal data, sensitive archives or corpora, Indigenous or community-governed material, protected or copyrighted material, or restricted sources, stop and record:
+
+- applicable informed consent and ethics/IRB or equivalent approval, exemption, or determination;
+- permission to access, collect, quote, reproduce, link, scrape, and analyze;
+- Indigenous, community, archive, platform, donor, or repository governance and terms, including who can authorize uses;
+- data minimization, confidentiality, de-identification limits, storage location, encryption/access controls, retention, destruction, and incident response;
+- whether any AI, hosted model, transcription service, search service, or collaborator would receive the material, plus explicit authority and transmission/security constraints;
+- risks to participants, communities, researchers, and third parties, and the action that would stop or redesign the work.
+
+Verify applicable current requirements with the responsible institution, community, archive, or data steward. Record the gate decision and evidence in `DECISIONS.md`, link it from `ROUTE.md`, and mark blocked work explicitly. Absence of a formal board does not erase consent, community governance, privacy, rights, or security obligations. Do not acquire or send the material while the gate is unresolved.
+
 ## Search in layers
 
 Define the question, concepts and synonyms in relevant languages, inclusion/exclusion logic, access limits, decision the search could change, and stopping condition. Search purposefully through:
@@ -38,7 +51,7 @@ Create one card in `sources/` per consulted source:
 - verified quotations with page/section/location:
 - claims this may support or challenge:
 - possible manuscript use:
-- rights, privacy, ethics, or disclosure constraints:
+- early-ethics decision link; rights, privacy, governance, or disclosure constraints:
 - verification still needed:
 ```
 
