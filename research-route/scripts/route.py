@@ -241,12 +241,15 @@ def _validate_item_id(item_id: str) -> None:
         raise ValueError(f"invalid work-item ID: {item_id}")
 
 
-def _require_item(root: Path, item_id: str) -> None:
+def _require_item(root: Path, item_id: str) -> Path:
     _validate_item_id(item_id)
     work_items = _require_directory(root / "work-items")
     matches = list(work_items.glob(f"{item_id}-*.md"))
     if len(matches) != 1:
         raise ValueError(f"work item not found: {item_id}")
+    if matches[0].is_symlink() or not matches[0].is_file():
+        raise ValueError(f"invalid work item: {item_id}")
+    return matches[0]
 
 
 def _require_directory(path: Path, create: bool = False) -> Path:
@@ -321,8 +324,8 @@ def _reserve_item_id(
 
 
 @contextmanager
-def _claim_guard(state_directory: Path, item_id: str) -> Iterator[None]:
-    with _exclusive_file_lock(state_directory / f"{item_id}.claim.guard"):
+def _claim_guard(state_directory: Path) -> Iterator[None]:
+    with _exclusive_file_lock(state_directory / "claims.guard"):
         yield
 
 
@@ -357,19 +360,50 @@ def new_work_item(
         "mode": mode,
         "output": None,
     }
-    _write_exclusive(item_path, _frontmatter_text(item_metadata), 0o644)
+    body = (
+        f"\n# {title}\n\n"
+        f"## Question or deliverable\n\n{title}\n\n"
+        "## Closure criteria\n\n"
+        "Record a defensible result and link its canonical output.\n"
+    )
+    _write_exclusive(item_path, _frontmatter_text(item_metadata, body), 0o644)
     return item_path
 
 
 def claim_item(root: Path, item_id: str, owner: str) -> Path:
     _require_route(root)
-    _require_item(root, item_id)
     if not owner:
         raise ValueError("owner must not be empty")
     state_directory = _require_directory(root / ".research-route", create=True)
     claims = _require_directory(state_directory / "claims", create=True)
     lock = claims / f"{item_id}.lock"
-    with _claim_guard(state_directory, item_id):
+    with _claim_guard(state_directory):
+        _require_route(root)
+        item_path = _require_item(root, item_id)
+        item, _ = parse_frontmatter(item_path)
+        record_errors = _work_item_record_errors(item)
+        if record_errors:
+            raise ValueError(f"invalid work item {item_path}: {record_errors[0][1]}")
+        if item.get("status") != "open":
+            raise ValueError(f"work item is not open: {item_id}")
+        dependencies = item.get("depends_on")
+        assert isinstance(dependencies, list)
+        unclosed: list[str] = []
+        for dependency in dependencies:
+            assert isinstance(dependency, str)
+            dependency_path = _require_item(root, dependency)
+            dependency_item, _ = parse_frontmatter(dependency_path)
+            dependency_errors = _work_item_record_errors(dependency_item)
+            if dependency_errors:
+                raise ValueError(
+                    f"invalid work item {dependency_path}: {dependency_errors[0][1]}"
+                )
+            if dependency_item.get("status") != "closed":
+                unclosed.append(dependency)
+        if unclosed:
+            raise ValueError(
+                f"work item dependencies are not closed: {', '.join(unclosed)}"
+            )
         claim = {
             "item_id": item_id,
             "owner": owner,
@@ -389,11 +423,14 @@ def release_item(
     state_directory = _require_directory(root / ".research-route")
     claims = _require_directory(state_directory / "claims")
     lock = claims / f"{item_id}.lock"
-    with _claim_guard(state_directory, item_id):
+    with _claim_guard(state_directory):
         try:
             claim = json.loads(lock.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise ValueError(f"work item is not claimed: {item_id}") from None
+        claim_errors = _claim_record_errors(claim)
+        if claim_errors:
+            raise ValueError(f"invalid claim {lock}: {claim_errors[0]}")
         if not isinstance(claim, dict) or claim.get("owner") != owner and not force:
             claimed_by = claim.get("owner") if isinstance(claim, dict) else "unknown"
             raise ValueError(f"claim belongs to {claimed_by}, not {owner}")
@@ -433,7 +470,26 @@ def _claim_record_errors(claim: object) -> tuple[str, ...]:
     owner = claim.get("owner")
     if not isinstance(owner, str) or not owner:
         errors.append("claim owner must not be empty")
+    try:
+        _parse_aware_timestamp(claim.get("timestamp"))
+    except ValueError:
+        errors.append(
+            "claim timestamp must be an ISO-8601 timezone-aware timestamp"
+        )
     return tuple(errors)
+
+
+def _parse_aware_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("timestamp must be a non-empty string")
+    normalized = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError("timestamp is not ISO-8601") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("timestamp must include a timezone")
+    return parsed.astimezone(timezone.utc)
 
 
 def _claim_identity_errors(
@@ -508,6 +564,60 @@ def _work_item_record_errors(
         errors.append(
             ("invalid-field", "depends_on must be a list of work-item IDs")
         )
+    return tuple(errors)
+
+
+def _work_item_section_errors(body: str) -> tuple[tuple[str, str], ...]:
+    errors: list[tuple[str, str]] = []
+    for heading in ("Question or deliverable", "Closure criteria"):
+        matches = re.findall(
+            rf"(?ms)^## {re.escape(heading)}[ \t]*\r?\n(.*?)(?=^## |\Z)",
+            body,
+        )
+        if not matches:
+            errors.append(
+                ("invalid-section", f"missing required section: {heading}")
+            )
+            continue
+        if len(matches) > 1:
+            errors.append(
+                ("invalid-section", f"duplicate required section: {heading}")
+            )
+            continue
+        content = re.sub(r"<!--.*?-->", "", matches[0], flags=re.DOTALL)
+        if not any(character.isalnum() for character in content):
+            errors.append(
+                (
+                    "invalid-section",
+                    f"{heading} must contain substantive text",
+                )
+            )
+    return tuple(errors)
+
+
+def _claim_compatibility_errors(
+    claim: dict[str, object], items: dict[str, dict[str, object]]
+) -> tuple[str, ...]:
+    item_id = claim.get("item_id")
+    if not isinstance(item_id, str) or item_id not in items:
+        return ()
+    item = items[item_id]
+    errors: list[str] = []
+    if item.get("status") != "open":
+        errors.append(f"claim targets non-open work item: {item_id}")
+    dependencies = item.get("depends_on")
+    if isinstance(dependencies, list):
+        unclosed = [
+            dependency
+            for dependency in dependencies
+            if isinstance(dependency, str)
+            and items.get(dependency, {}).get("status") != "closed"
+        ]
+        if unclosed:
+            errors.append(
+                "claim targets work with unclosed dependencies: "
+                + ", ".join(unclosed)
+            )
     return tuple(errors)
 
 
@@ -649,6 +759,36 @@ def _validate_markdown_links(
                 )
 
 
+def _stale_handoff_issue(root: Path, route: Path) -> ValidationIssue | None:
+    handoff = root / "HANDOFF.md"
+    if handoff.is_symlink() or not handoff.is_file():
+        return None
+    try:
+        content = handoff.read_bytes()
+        if content.count(HANDOFF_BEGIN) != 1 or content.count(HANDOFF_END) != 1:
+            return None
+        mechanical = content.split(HANDOFF_BEGIN, 1)[1].split(HANDOFF_END, 1)[0]
+        match = re.search(
+            rb"(?m)^- ROUTE\.md modified:[ \t]*(.+?)[ \t]*\r?$", mechanical
+        )
+        if match is None:
+            return None
+        snapshot_text = match.group(1).decode("utf-8")
+        snapshot = _parse_aware_timestamp(snapshot_text)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    fraction = re.search(r"T\d{2}:\d{2}:\d{2}[.,](\d+)", snapshot_text)
+    resolution = 10 ** -min(len(fraction.group(1)), 6) if fraction else 1.0
+    current = datetime.fromtimestamp(route.stat().st_mtime, timezone.utc)
+    if (current - snapshot).total_seconds() < resolution:
+        return None
+    return ValidationIssue(
+        "stale-handoff",
+        "HANDOFF.md",
+        "mechanical snapshot predates the current ROUTE.md",
+    )
+
+
 def validate_route(root: Path) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     if root.is_symlink() or not root.is_dir():
@@ -738,6 +878,7 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 )
 
     items_by_id: dict[str, list[Path]] = {}
+    item_records_by_id: dict[str, list[dict[str, object]]] = {}
     dependencies_by_id: dict[str, list[str]] = {}
     work_items = root / "work-items"
     if work_items.is_dir() and not work_items.is_symlink():
@@ -746,7 +887,7 @@ def validate_route(root: Path) -> list[ValidationIssue]:
             if path.is_symlink() or not path.is_file():
                 continue
             try:
-                metadata, _ = parse_frontmatter(path)
+                metadata, body = parse_frontmatter(path)
             except (OSError, UnicodeError, ValueError) as error:
                 issues.append(
                     ValidationIssue("invalid-frontmatter", relative_path, str(error))
@@ -757,10 +898,15 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                 ValidationIssue(code, relative_path, message)
                 for code, message in record_errors
             )
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in _work_item_section_errors(body)
+            )
             item_id = metadata.get("id")
             if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
                 continue
             items_by_id.setdefault(item_id, []).append(path)
+            item_records_by_id.setdefault(item_id, []).append(metadata)
             if not path.name.startswith(f"{item_id}-"):
                 issues.append(
                     ValidationIssue(
@@ -778,6 +924,11 @@ def validate_route(root: Path) -> list[ValidationIssue]:
 
     issues.extend(_duplicate_item_issues(root, items_by_id))
     known_ids = set(items_by_id)
+    unique_items = {
+        item_id: records[0]
+        for item_id, records in item_records_by_id.items()
+        if len(records) == 1
+    }
     for item_id, dependencies in sorted(dependencies_by_id.items()):
         for dependency in sorted(set(dependencies) - known_ids):
             for path in items_by_id[item_id]:
@@ -831,6 +982,14 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                     claim, filename_id, known_ids
                 )
             )
+            issues.extend(
+                ValidationIssue("incompatible-claim", relative_path, message)
+                for message in _claim_compatibility_errors(claim, unique_items)
+            )
+    if route_path.is_file() and not route_path.is_symlink():
+        stale_issue = _stale_handoff_issue(root, route_path)
+        if stale_issue is not None:
+            issues.append(stale_issue)
     _validate_markdown_links(root, issues)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
@@ -896,6 +1055,11 @@ def scaffold_handoff(root: Path) -> Path:
     if duplicate_issues:
         raise ValueError(f"ambiguous work items: {duplicate_issues[0].message}")
     known_ids = set(items_by_id)
+    item_records = {
+        item_id: item
+        for item in items
+        if isinstance((item_id := item.get("id")), str)
+    }
     statuses = {item.get("id"): item.get("status") for item in items}
     active_claims: list[str] = []
     claimed_next_actions: list[str] = []
@@ -917,6 +1081,11 @@ def scaffold_handoff(root: Path) -> Path:
             reference_errors = _claim_reference_errors(claim, path.stem, known_ids)
             if reference_errors:
                 raise ValueError(f"invalid claim {path}: {reference_errors[0][1]}")
+            compatibility_errors = _claim_compatibility_errors(claim, item_records)
+            if compatibility_errors:
+                raise ValueError(
+                    f"incompatible claim {path}: {compatibility_errors[0]}"
+                )
             claimed_ids.add(claim.get("item_id"))
             active_claims.append(
                 f"- {claim.get('item_id')}: {claim.get('owner')}"

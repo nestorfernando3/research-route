@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+from datetime import datetime, timezone
 import importlib.util
 import io
 import json
+import os
+import re
 import shutil
 import stat
 import subprocess
@@ -77,7 +80,9 @@ class RouteCliTests(unittest.TestCase):
                     "mode": "deep",
                     "output": None,
                 },
-                "\n# Work item\n",
+                "\n# Work item\n\n"
+                "## Question or deliverable\n\nTest the stated question.\n\n"
+                "## Closure criteria\n\nRecord and link the result.\n",
             ),
             encoding="utf-8",
         )
@@ -319,6 +324,44 @@ class RouteCliTests(unittest.TestCase):
         )
         self.assertEqual(owner_release.returncode, 0, owner_release.stderr)
         self.assertFalse(lock.exists())
+
+    def test_claim_requires_open_work_with_closed_dependencies(self):
+        self.init_project()
+        dependency = ROUTE_CLI.new_work_item(
+            self.project, "Establish evidence", "source", "light", []
+        )
+        dependent = ROUTE_CLI.new_work_item(
+            self.project, "Synthesize evidence", "synthesis", "deep", ["rr-001"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "dependencies are not closed"):
+            ROUTE_CLI.claim_item(self.project, "rr-002", "agent-a")
+
+        dependency_metadata, dependency_body = ROUTE_CLI.parse_frontmatter(dependency)
+        dependency_metadata["status"] = "closed"
+        ROUTE_CLI.write_frontmatter(
+            dependency, dependency_metadata, dependency_body
+        )
+        ROUTE_CLI.claim_item(self.project, "rr-002", "agent-a")
+        ROUTE_CLI.release_item(self.project, "rr-002", "agent-a")
+        dependent_metadata, dependent_body = ROUTE_CLI.parse_frontmatter(dependent)
+        dependent_metadata["status"] = "closed"
+        ROUTE_CLI.write_frontmatter(dependent, dependent_metadata, dependent_body)
+
+        with self.assertRaisesRegex(ValueError, "is not open"):
+            ROUTE_CLI.claim_item(self.project, "rr-002", "agent-a")
+
+    def test_new_work_item_has_editable_required_sections(self):
+        self.init_project()
+
+        item = ROUTE_CLI.new_work_item(
+            self.project, "Map rival accounts", "synthesis", "deep", []
+        )
+        text = item.read_text(encoding="utf-8")
+
+        self.assertIn("## Question or deliverable\n\nMap rival accounts", text)
+        self.assertIn("## Closure criteria\n\n", text)
+        self.assertEqual(ROUTE_CLI.validate_route(self.project), [])
 
     def test_force_release_warns_and_removes_another_owners_claim(self):
         self.init_project_with_item()
@@ -734,6 +777,71 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(
             issues,
             sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message)),
+        )
+
+    def test_validate_reports_empty_required_work_item_sections(self):
+        self.init_project()
+        item = self.write_item("rr-001-item.md", "rr-001", [])
+        metadata, _ = ROUTE_CLI.parse_frontmatter(item)
+        ROUTE_CLI.write_frontmatter(
+            item,
+            metadata,
+            "\n# Work item\n\n## Question or deliverable\n\n<!-- empty -->\n",
+        )
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        messages = {issue.message for issue in issues if issue.code == "invalid-section"}
+
+        self.assertIn("Question or deliverable must contain substantive text", messages)
+        self.assertIn("missing required section: Closure criteria", messages)
+
+    def test_validate_reports_incompatible_claim_and_invalid_timestamp(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        item = next((self.project / "work-items").glob("rr-001-*.md"))
+        metadata, body = ROUTE_CLI.parse_frontmatter(item)
+        metadata["status"] = "closed"
+        ROUTE_CLI.write_frontmatter(item, metadata, body)
+        lock = self.project / ".research-route" / "claims" / "rr-001.lock"
+        claim = json.loads(lock.read_text(encoding="utf-8"))
+        claim["timestamp"] = "2026-07-13T00:00:00"
+        lock.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+
+        issues = ROUTE_CLI.validate_route(self.project)
+        codes = {issue.code for issue in issues}
+
+        self.assertIn("invalid-claim", codes)
+        self.assertIn("incompatible-claim", codes)
+        with self.assertRaisesRegex(ValueError, "timestamp"):
+            ROUTE_CLI.scaffold_handoff(self.project)
+        with self.assertRaisesRegex(ValueError, "timestamp"):
+            ROUTE_CLI.release_item(self.project, "rr-001", "agent-a")
+
+    def test_validate_detects_stale_handoff_without_precision_false_positive(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        handoff = ROUTE_CLI.scaffold_handoff(self.project)
+        route_time = datetime.fromtimestamp(route.stat().st_mtime, timezone.utc)
+        second_precision = route_time.replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        )
+        text = handoff.read_text(encoding="utf-8")
+        text = re.sub(
+            r"(?m)^- ROUTE\.md modified: .+$",
+            f"- ROUTE.md modified: {second_precision}",
+            text,
+        )
+        handoff.write_text(text, encoding="utf-8")
+
+        self.assertNotIn(
+            "stale-handoff", {issue.code for issue in ROUTE_CLI.validate_route(self.project)}
+        )
+
+        current_ns = route.stat().st_mtime_ns
+        os.utime(route, ns=(route.stat().st_atime_ns, current_ns + 2_000_000_000))
+
+        self.assertIn(
+            "stale-handoff", {issue.code for issue in ROUTE_CLI.validate_route(self.project)}
         )
 
     def test_validate_reports_missing_paths_and_malformed_frontmatter(self):
