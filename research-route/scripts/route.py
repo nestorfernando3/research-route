@@ -161,13 +161,14 @@ def _require_item(root: Path, item_id: str) -> None:
 def _require_directory(path: Path, create: bool = False) -> Path:
     if path.is_symlink():
         raise ValueError(f"symlinked directory is not allowed: {path}")
-    if path.exists():
-        if not path.is_dir():
-            raise ValueError(f"expected directory: {path}")
-    elif create:
-        path.mkdir()
-    else:
+    if create:
+        path.mkdir(exist_ok=True)
+    elif not path.exists():
         raise ValueError(f"missing directory: {path}")
+    if path.is_symlink():
+        raise ValueError(f"symlinked directory is not allowed: {path}")
+    if not path.is_dir():
+        raise ValueError(f"expected directory: {path}")
     return path
 
 

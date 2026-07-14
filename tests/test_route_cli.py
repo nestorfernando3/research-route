@@ -526,3 +526,102 @@ class RouteCliTests(unittest.TestCase):
             ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
 
         self.assertEqual(list(external.iterdir()), [])
+
+    def test_concurrent_new_calls_race_safely_creating_state_directory(self):
+        self.init_project()
+        state = self.project / ".research-route"
+        creation_barrier = threading.Barrier(2)
+        original_mkdir = Path.mkdir
+
+        def synchronized_mkdir(path, *args, **kwargs):
+            if path == state:
+                creation_barrier.wait(2)
+            return original_mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "mkdir", synchronized_mkdir):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        ROUTE_CLI.new_work_item,
+                        self.project,
+                        f"State race {index}",
+                        "source",
+                        "light",
+                        [],
+                    )
+                    for index in range(2)
+                ]
+                paths = [future.result(timeout=3) for future in futures]
+
+        self.assertEqual({path.name[:6] for path in paths}, {"rr-001", "rr-002"})
+        self.assertTrue(state.is_dir())
+        self.assertFalse(state.is_symlink())
+
+    def test_concurrent_new_calls_race_safely_creating_allocations_directory(self):
+        self.init_project()
+        state = self.project / ".research-route"
+        state.mkdir()
+        allocations = state / "allocations"
+        creation_barrier = threading.Barrier(2)
+        original_mkdir = Path.mkdir
+
+        def synchronized_mkdir(path, *args, **kwargs):
+            if path == allocations:
+                creation_barrier.wait(2)
+            return original_mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "mkdir", synchronized_mkdir):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        ROUTE_CLI.new_work_item,
+                        self.project,
+                        f"Allocation directory race {index}",
+                        "source",
+                        "light",
+                        [],
+                    )
+                    for index in range(2)
+                ]
+                paths = [future.result(timeout=3) for future in futures]
+
+        self.assertEqual({path.name[:6] for path in paths}, {"rr-001", "rr-002"})
+        self.assertTrue(allocations.is_dir())
+        self.assertFalse(allocations.is_symlink())
+
+    def test_concurrent_claims_race_safely_creating_claims_directory(self):
+        self.init_project()
+        first_item = ROUTE_CLI.new_work_item(
+            self.project, "Claim race one", "source", "light", []
+        )
+        second_item = ROUTE_CLI.new_work_item(
+            self.project, "Claim race two", "source", "light", []
+        )
+        claims = self.project / ".research-route" / "claims"
+        creation_barrier = threading.Barrier(2)
+        original_mkdir = Path.mkdir
+
+        def synchronized_mkdir(path, *args, **kwargs):
+            if path == claims:
+                creation_barrier.wait(2)
+            return original_mkdir(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "mkdir", synchronized_mkdir):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        ROUTE_CLI.claim_item,
+                        self.project,
+                        item_id,
+                        owner,
+                    )
+                    for item_id, owner in (
+                        (first_item.name[:6], "agent-a"),
+                        (second_item.name[:6], "agent-b"),
+                    )
+                ]
+                locks = [future.result(timeout=3) for future in futures]
+
+        self.assertEqual({lock.name for lock in locks}, {"rr-001.lock", "rr-002.lock"})
+        self.assertTrue(claims.is_dir())
+        self.assertFalse(claims.is_symlink())
