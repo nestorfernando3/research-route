@@ -1,5 +1,9 @@
 # Research Route
 
+<p align="center">
+  <img src="assets/research-route-logo.png" alt="Research Route logo" width="720">
+</p>
+
 Research Route is a portable academic-writing skill for turning a research question into a durable paper project that can survive agent switches, harness changes, and long revision cycles.
 
 It is tuned primarily for humanities and social-science prose and argument, but it works anywhere the work depends on judgment, source discipline, and editorial fit.
