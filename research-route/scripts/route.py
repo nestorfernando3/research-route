@@ -423,6 +423,64 @@ def _missing_fields(
         )
 
 
+def _claim_record_errors(claim: object) -> tuple[str, ...]:
+    if not isinstance(claim, dict):
+        return ("claim must be a JSON object",)
+    errors: list[str] = []
+    item_id = claim.get("item_id")
+    if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+        errors.append("claim item_id must be a work-item ID")
+    owner = claim.get("owner")
+    if not isinstance(owner, str) or not owner:
+        errors.append("claim owner must not be empty")
+    return tuple(errors)
+
+
+def _work_item_record_errors(
+    metadata: dict[str, object],
+) -> tuple[tuple[str, str], ...]:
+    errors: list[tuple[str, str]] = [
+        ("missing-field", f"missing required field: {field}")
+        for field in sorted(ITEM_FIELDS - metadata.keys())
+    ]
+    item_id = metadata.get("id")
+    if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
+        errors.append(("invalid-field", f"invalid work-item id: {item_id!r}"))
+    title = metadata.get("title")
+    if "title" in metadata and (
+        not isinstance(title, str) or not title.strip()
+    ):
+        errors.append(("invalid-field", "title must be a non-empty string"))
+    for field in ("owner", "output"):
+        value = metadata.get(field)
+        if value is not None and not isinstance(value, str):
+            errors.append(("invalid-field", f"{field} must be a string or null"))
+    schema_version = metadata.get("schema_version")
+    if schema_version != PROJECT_SCHEMA_VERSION:
+        errors.append(
+            ("unsupported-schema", f"unsupported schema_version: {schema_version!r}")
+        )
+    for field, allowed in (
+        ("type", ALLOWED_ITEM_TYPES),
+        ("status", ALLOWED_STATUSES),
+        ("mode", ALLOWED_MODES),
+    ):
+        value = metadata.get(field)
+        if field in metadata and (
+            not isinstance(value, str) or value not in allowed
+        ):
+            errors.append(("invalid-enum", f"unsupported {field}: {value!r}"))
+    dependencies = metadata.get("depends_on")
+    if not isinstance(dependencies, list) or not all(
+        isinstance(dependency, str) and ITEM_ID.fullmatch(dependency)
+        for dependency in dependencies
+    ):
+        errors.append(
+            ("invalid-field", "depends_on must be a list of work-item IDs")
+        )
+    return tuple(errors)
+
+
 def _dependency_cycles(graph: dict[str, list[str]]) -> list[tuple[str, ...]]:
     state: dict[str, int] = {}
     cycles: set[tuple[str, ...]] = set()
@@ -645,37 +703,15 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                     ValidationIssue("invalid-frontmatter", relative_path, str(error))
                 )
                 continue
-            _missing_fields(issues, root, path, metadata, ITEM_FIELDS)
+            record_errors = _work_item_record_errors(metadata)
+            issues.extend(
+                ValidationIssue(code, relative_path, message)
+                for code, message in record_errors
+            )
             item_id = metadata.get("id")
             if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
-                issues.append(
-                    ValidationIssue(
-                        "invalid-field", relative_path, f"invalid work-item id: {item_id!r}"
-                    )
-                )
                 continue
             items_by_id.setdefault(item_id, []).append(path)
-            title = metadata.get("title")
-            if "title" in metadata and (
-                not isinstance(title, str) or not title.strip()
-            ):
-                issues.append(
-                    ValidationIssue(
-                        "invalid-field",
-                        relative_path,
-                        "title must be a non-empty string",
-                    )
-                )
-            for field in ("owner", "output"):
-                value = metadata.get(field)
-                if value is not None and not isinstance(value, str):
-                    issues.append(
-                        ValidationIssue(
-                            "invalid-field",
-                            relative_path,
-                            f"{field} must be a string or null",
-                        )
-                    )
             if not path.name.startswith(f"{item_id}-"):
                 issues.append(
                     ValidationIssue(
@@ -684,43 +720,11 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                         f"filename does not match work-item id {item_id}",
                     )
                 )
-            if metadata.get("schema_version") != PROJECT_SCHEMA_VERSION:
-                issues.append(
-                    ValidationIssue(
-                        "unsupported-schema",
-                        relative_path,
-                        f"unsupported schema_version: {metadata.get('schema_version')!r}",
-                    )
-                )
-            for field, allowed in (
-                ("type", ALLOWED_ITEM_TYPES),
-                ("status", ALLOWED_STATUSES),
-                ("mode", ALLOWED_MODES),
-            ):
-                value = metadata.get(field)
-                if field in metadata and (
-                    not isinstance(value, str) or value not in allowed
-                ):
-                    issues.append(
-                        ValidationIssue(
-                            "invalid-enum",
-                            relative_path,
-                            f"unsupported {field}: {value!r}",
-                        )
-                    )
             dependencies = metadata.get("depends_on")
-            if not isinstance(dependencies, list) or not all(
+            if isinstance(dependencies, list) and all(
                 isinstance(dependency, str) and ITEM_ID.fullmatch(dependency)
                 for dependency in dependencies
             ):
-                issues.append(
-                    ValidationIssue(
-                        "invalid-field",
-                        relative_path,
-                        "depends_on must be a list of work-item IDs",
-                    )
-                )
-            else:
                 dependencies_by_id.setdefault(item_id, []).extend(dependencies)
 
     for item_id, paths in sorted(items_by_id.items()):
@@ -773,12 +777,10 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                     ValidationIssue("invalid-claim", relative_path, str(error))
                 )
                 continue
+            claim_errors = _claim_record_errors(claim)
+            for message in claim_errors:
+                issues.append(ValidationIssue("invalid-claim", relative_path, message))
             if not isinstance(claim, dict):
-                issues.append(
-                    ValidationIssue(
-                        "invalid-claim", relative_path, "claim must be a JSON object"
-                    )
-                )
                 continue
             claimed_id = claim.get("item_id")
             if claimed_id != filename_id:
@@ -787,14 +789,6 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                         "claim-mismatch",
                         relative_path,
                         f"claim item_id {claimed_id!r} does not match {filename_id!r}",
-                    )
-                )
-            if not isinstance(claimed_id, str):
-                issues.append(
-                    ValidationIssue(
-                        "invalid-claim",
-                        relative_path,
-                        "claim item_id must be a work-item ID",
                     )
                 )
             referenced_ids = {filename_id}
@@ -809,13 +803,6 @@ def validate_route(root: Path) -> list[ValidationIssue]:
                             f"claim references missing work item: {item_id}",
                         )
                     )
-            if not isinstance(claim.get("owner"), str) or not claim["owner"]:
-                issues.append(
-                    ValidationIssue(
-                        "invalid-claim", relative_path, "claim owner must not be empty"
-                    )
-                )
-
     _validate_markdown_links(root, issues)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
@@ -868,6 +855,9 @@ def scaffold_handoff(root: Path) -> Path:
         if not path.is_file():
             continue
         item_metadata, _ = parse_frontmatter(path)
+        record_errors = _work_item_record_errors(item_metadata)
+        if record_errors:
+            raise ValueError(f"invalid work item {path}: {record_errors[0][1]}")
         items.append(item_metadata)
 
     active_claims: list[str] = []
@@ -879,8 +869,10 @@ def scaffold_handoff(root: Path) -> Path:
             if path.is_symlink():
                 raise ValueError(f"symlinked claim is not allowed: {path}")
             claim = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(claim, dict):
-                raise ValueError(f"invalid claim: {path}")
+            claim_errors = _claim_record_errors(claim)
+            if claim_errors:
+                raise ValueError(f"invalid claim {path}: {claim_errors[0]}")
+            assert isinstance(claim, dict)
             claimed_ids.add(claim.get("item_id"))
             active_claims.append(
                 f"- {claim.get('item_id')}: {claim.get('owner')}"

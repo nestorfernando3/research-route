@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1226,3 +1227,128 @@ class RouteCliTests(unittest.TestCase):
         ROUTE_CLI.scaffold_handoff(self.project)
 
         self.assertEqual(handoff.stat().st_mode & 0o777, 0o644)
+
+    def test_handoff_refuses_semantically_malformed_claim_records(self):
+        malformed_claims = (
+            ("empty-object", {}),
+            ("missing-item-id", {"owner": "agent-a"}),
+            ("invalid-item-id", {"item_id": "not-an-id", "owner": "agent-a"}),
+            ("missing-owner", {"item_id": "rr-001"}),
+            ("non-string-owner", {"item_id": "rr-001", "owner": 7}),
+            ("empty-owner", {"item_id": "rr-001", "owner": ""}),
+        )
+        for index, (description, claim) in enumerate(malformed_claims):
+            with self.subTest(description=description):
+                project = Path(self.temporary_directory.name) / f"claim-route-{index}"
+                initialized = self.run_cli(
+                    "init",
+                    str(project),
+                    "--title",
+                    "Malformed claim route",
+                    "--language",
+                    "en",
+                )
+                self.assertEqual(initialized.returncode, 0, initialized.stderr)
+                item = project / "work-items" / "rr-001-item.md"
+                item.write_text(
+                    ROUTE_CLI._frontmatter_text(
+                        {
+                            "id": "rr-001",
+                            "title": "Valid item",
+                            "schema_version": 1,
+                            "type": "source",
+                            "status": "open",
+                            "depends_on": [],
+                            "owner": None,
+                            "mode": "light",
+                            "output": None,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                claims = project / ".research-route" / "claims"
+                claims.mkdir(parents=True)
+                claim_path = claims / "rr-001.lock"
+                claim_path.write_text(json.dumps(claim) + "\n", encoding="utf-8")
+                claim_before = claim_path.read_bytes()
+                handoff = project / "HANDOFF.md"
+                handoff.chmod(0o640)
+                handoff_before = handoff.read_bytes()
+                mode_before = stat.S_IMODE(handoff.stat().st_mode)
+
+                with self.assertRaises(ValueError):
+                    ROUTE_CLI.scaffold_handoff(project)
+
+                self.assertEqual(handoff.read_bytes(), handoff_before)
+                self.assertEqual(stat.S_IMODE(handoff.stat().st_mode), mode_before)
+                self.assertEqual(claim_path.read_bytes(), claim_before)
+
+    def test_handoff_refuses_semantically_malformed_work_item_records(self):
+        valid_item = {
+            "id": "rr-001",
+            "title": "Valid item",
+            "schema_version": 1,
+            "type": "source",
+            "status": "open",
+            "depends_on": [],
+            "owner": None,
+            "mode": "light",
+            "output": None,
+        }
+        malformed_fields = (
+            ("missing-id", "id", None, True),
+            ("invalid-id", "id", "not-an-id", False),
+            ("missing-title", "title", None, True),
+            ("invalid-title", "title", "", False),
+            ("missing-status", "status", None, True),
+            ("invalid-status", "status", "running", False),
+            ("missing-depends-on", "depends_on", None, True),
+            ("invalid-depends-on", "depends_on", ["not-an-id"], False),
+        )
+        for index, (description, field, value, remove) in enumerate(malformed_fields):
+            with self.subTest(description=description):
+                project = Path(self.temporary_directory.name) / f"item-route-{index}"
+                initialized = self.run_cli(
+                    "init",
+                    str(project),
+                    "--title",
+                    "Malformed item route",
+                    "--language",
+                    "en",
+                )
+                self.assertEqual(initialized.returncode, 0, initialized.stderr)
+                metadata = valid_item.copy()
+                if remove:
+                    metadata.pop(field)
+                else:
+                    metadata[field] = value
+                item = project / "work-items" / "rr-001-malformed.md"
+                item.write_text(
+                    ROUTE_CLI._frontmatter_text(metadata), encoding="utf-8"
+                )
+                item_before = item.read_bytes()
+                handoff = project / "HANDOFF.md"
+                handoff.chmod(0o640)
+                handoff_before = handoff.read_bytes()
+                mode_before = stat.S_IMODE(handoff.stat().st_mode)
+
+                with self.assertRaises(ValueError):
+                    ROUTE_CLI.scaffold_handoff(project)
+
+                self.assertEqual(handoff.read_bytes(), handoff_before)
+                self.assertEqual(stat.S_IMODE(handoff.stat().st_mode), mode_before)
+                self.assertEqual(item.read_bytes(), item_before)
+
+    def test_handoff_does_not_require_unrelated_manuscript_links_to_be_valid(self):
+        self.init_project()
+        manuscript = self.project / "manuscript" / "sections" / "draft.md"
+        manuscript.write_text(
+            "[unfinished citation](../../sources/not-yet-created.md)\n",
+            encoding="utf-8",
+        )
+        manuscript_before = manuscript.read_bytes()
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertIn("Generated at", handoff.read_text(encoding="utf-8"))
+        self.assertEqual(manuscript.read_bytes(), manuscript_before)
