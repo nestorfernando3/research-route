@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import unicodedata
@@ -102,6 +103,7 @@ MIGRATIONS: dict[tuple[int, int], Migration] = {}
 
 
 def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    mode = stat.S_IMODE(path.stat().st_mode)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -113,6 +115,7 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
         ) as temporary_file:
             temporary_path = Path(temporary_file.name)
             temporary_file.write(content)
+        temporary_path.chmod(mode)
         temporary_path.replace(path)
     finally:
         if temporary_path is not None and temporary_path.exists():
@@ -857,28 +860,44 @@ def scaffold_handoff(root: Path) -> Path:
     prefix, remainder = original.split(HANDOFF_BEGIN, 1)
     _, suffix = remainder.split(HANDOFF_END, 1)
 
-    open_items: list[str] = []
+    items: list[dict[str, object]] = []
     work_items = _require_directory(root / "work-items")
     for path in sorted(work_items.glob("*.md")):
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
+            raise ValueError(f"symlinked work item is not allowed: {path}")
+        if not path.is_file():
             continue
         item_metadata, _ = parse_frontmatter(path)
-        if item_metadata.get("status") == "open":
-            open_items.append(
-                f"- {item_metadata.get('id')}: {item_metadata.get('title')}"
-            )
+        items.append(item_metadata)
 
     active_claims: list[str] = []
+    claimed_ids: set[object] = set()
     claims = root / ".research-route" / "claims"
     if claims.is_symlink() or claims.exists():
         _require_directory(claims)
         for path in sorted(claims.glob("*.lock")):
+            if path.is_symlink():
+                raise ValueError(f"symlinked claim is not allowed: {path}")
             claim = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(claim, dict):
                 raise ValueError(f"invalid claim: {path}")
+            claimed_ids.add(claim.get("item_id"))
             active_claims.append(
                 f"- {claim.get('item_id')}: {claim.get('owner')}"
             )
+
+    statuses = {item.get("id"): item.get("status") for item in items}
+    open_items = [
+        f"- {item.get('id')}: {item.get('title')}"
+        for item in items
+        if item.get("status") == "open"
+        and item.get("id") not in claimed_ids
+        and isinstance(item.get("depends_on"), list)
+        and all(
+            statuses.get(dependency) == "closed"
+            for dependency in item["depends_on"]
+        )
+    ]
 
     generated_at = datetime.now(timezone.utc).isoformat()
     route_modified = datetime.fromtimestamp(

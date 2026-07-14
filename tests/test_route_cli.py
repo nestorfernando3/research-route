@@ -1104,7 +1104,10 @@ class RouteCliTests(unittest.TestCase):
         self.assertIn("Current cycle: discover", handoff)
         self.assertIn("Target venue: Journal A", handoff)
         self.assertIn("Fallback venue: Journal B", handoff)
-        self.assertIn("rr-001: Map rival accounts", handoff)
+        frontier = handoff.split("### Open frontier candidates\n\n", 1)[1].split(
+            "\n\n### Active claims", 1
+        )[0]
+        self.assertEqual(frontier, "- None")
         self.assertIn("rr-001: agent-a", handoff)
         self.assertIn("Archive access delayed.", handoff)
 
@@ -1121,3 +1124,105 @@ class RouteCliTests(unittest.TestCase):
             ROUTE_CLI.scaffold_handoff(self.project)
 
         self.assertEqual(handoff.read_bytes(), before)
+
+    def test_handoff_frontier_contains_only_ready_unclaimed_open_items(self):
+        self.init_project()
+        self.write_item("rr-001-ready.md", "rr-001", [])
+        self.write_item("rr-002-claimed.md", "rr-002", [])
+        self.write_item("rr-003-blocked.md", "rr-003", ["rr-001"])
+        self.write_item("rr-004-ready-after-closed.md", "rr-004", ["rr-005"])
+        closed = self.write_item("rr-005-closed.md", "rr-005", [])
+        closed_metadata, closed_body = ROUTE_CLI.parse_frontmatter(closed)
+        closed_metadata["status"] = "closed"
+        ROUTE_CLI.write_frontmatter(closed, closed_metadata, closed_body)
+        ROUTE_CLI.claim_item(self.project, "rr-002", "agent-a")
+
+        handoff = ROUTE_CLI.scaffold_handoff(self.project).read_text(encoding="utf-8")
+        frontier = handoff.split("### Open frontier candidates\n\n", 1)[1].split(
+            "\n\n### Active claims", 1
+        )[0]
+        claims = handoff.split("### Active claims\n\n", 1)[1].split(
+            "\n\n### Blocks", 1
+        )[0]
+
+        self.assertIn("rr-001", frontier)
+        self.assertIn("rr-004", frontier)
+        self.assertNotIn("rr-002", frontier)
+        self.assertNotIn("rr-003", frontier)
+        self.assertNotIn("rr-005", frontier)
+        self.assertIn("rr-002: agent-a", claims)
+        self.assertNotIn("rr-001", claims)
+        self.assertNotIn("rr-003", claims)
+        self.assertNotIn("rr-004", claims)
+
+    def test_handoff_refuses_valid_and_broken_per_file_symlinks(self):
+        cases = (
+            ("work-item", True),
+            ("work-item", False),
+            ("claim-lock", True),
+            ("claim-lock", False),
+        )
+        for index, (kind, target_exists) in enumerate(cases):
+            with self.subTest(kind=kind, target_exists=target_exists):
+                project = Path(self.temporary_directory.name) / f"route-{index}"
+                initialized = self.run_cli(
+                    "init",
+                    str(project),
+                    "--title",
+                    "Symlink route",
+                    "--language",
+                    "en",
+                )
+                self.assertEqual(initialized.returncode, 0, initialized.stderr)
+                external = Path(self.temporary_directory.name) / f"external-{index}"
+                if kind == "work-item":
+                    if target_exists:
+                        external.write_text(
+                            ROUTE_CLI._frontmatter_text(
+                                {
+                                    "id": "rr-001",
+                                    "title": "External item",
+                                    "schema_version": 1,
+                                    "type": "source",
+                                    "status": "open",
+                                    "depends_on": [],
+                                    "owner": None,
+                                    "mode": "light",
+                                    "output": None,
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                    linked = project / "work-items" / "rr-001-external.md"
+                else:
+                    claims = project / ".research-route" / "claims"
+                    claims.mkdir(parents=True)
+                    if target_exists:
+                        external.write_text(
+                            '{"item_id": "rr-001", "owner": "agent-a"}\n',
+                            encoding="utf-8",
+                        )
+                    linked = claims / "rr-001.lock"
+                linked.symlink_to(external)
+                target_before = external.read_bytes() if target_exists else None
+                handoff = project / "HANDOFF.md"
+                handoff_before = handoff.read_bytes()
+
+                with self.assertRaises(ValueError):
+                    ROUTE_CLI.scaffold_handoff(project)
+
+                self.assertEqual(handoff.read_bytes(), handoff_before)
+                self.assertTrue(linked.is_symlink())
+                if target_exists:
+                    self.assertEqual(external.read_bytes(), target_before)
+                else:
+                    self.assertFalse(external.exists())
+
+    def test_handoff_preserves_existing_file_mode_across_atomic_replacement(self):
+        self.init_project()
+        handoff = self.project / "HANDOFF.md"
+        handoff.chmod(0o644)
+
+        ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(handoff.stat().st_mode & 0o777, 0o644)
