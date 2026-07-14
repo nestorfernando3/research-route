@@ -471,18 +471,18 @@ class RouteCliTests(unittest.TestCase):
         self.init_project()
         first_at_route_write = threading.Event()
         allow_first_write = threading.Event()
-        original_write = ROUTE_CLI.write_frontmatter
+        original_write = ROUTE_CLI._write_frontmatter_at
 
-        def delayed_write(path, metadata, body):
+        def delayed_write(directory_fd, name, metadata, body):
             if (
-                path == self.project / "ROUTE.md"
+                name == "ROUTE.md"
                 and threading.current_thread().name == "allocation_0"
             ):
                 first_at_route_write.set()
                 self.assertTrue(allow_first_write.wait(2))
-            return original_write(path, metadata, body)
+            return original_write(directory_fd, name, metadata, body)
 
-        with mock.patch.object(ROUTE_CLI, "write_frontmatter", delayed_write):
+        with mock.patch.object(ROUTE_CLI, "_write_frontmatter_at", delayed_write):
             with ThreadPoolExecutor(
                 max_workers=2, thread_name_prefix="allocation"
             ) as executor:
@@ -516,15 +516,15 @@ class RouteCliTests(unittest.TestCase):
         item_write_started = threading.Event()
         allow_item_write = threading.Event()
         handoff_finished = threading.Event()
-        original_write = ROUTE_CLI._write_exclusive
+        original_write = ROUTE_CLI._write_exclusive_at
 
-        def delayed_write(path, content, mode):
-            if path.suffix == ".md":
+        def delayed_write(directory_fd, name, content, mode):
+            if name.endswith(".md"):
                 item_write_started.set()
                 self.assertTrue(allow_item_write.wait(2))
-            return original_write(path, content, mode)
+            return original_write(directory_fd, name, content, mode)
 
-        with mock.patch.object(ROUTE_CLI, "_write_exclusive", delayed_write):
+        with mock.patch.object(ROUTE_CLI, "_write_exclusive_at", delayed_write):
             creator = threading.Thread(
                 target=ROUTE_CLI.new_work_item,
                 args=(self.project, "Guarded publication", "source", "light", []),
@@ -1007,9 +1007,9 @@ class RouteCliTests(unittest.TestCase):
         before = handoff.read_bytes()
         original_check = ROUTE_CLI._route_snapshot_is_current
 
-        def mutate_then_check(path: Path, signature: tuple[int, ...]) -> bool:
-            path.write_bytes(path.read_bytes() + b"\n")
-            return original_check(path, signature)
+        def mutate_then_check(root_fd: int, signature: tuple[int, ...]) -> bool:
+            route.write_bytes(route.read_bytes() + b"\n")
+            return original_check(root_fd, signature)
 
         with mock.patch.object(
             ROUTE_CLI, "_route_snapshot_is_current", side_effect=mutate_then_check
@@ -1024,14 +1024,14 @@ class RouteCliTests(unittest.TestCase):
         route = self.project / "ROUTE.md"
         handoff = self.project / "HANDOFF.md"
         before = handoff.read_bytes()
-        original_write = ROUTE_CLI._atomic_write_bytes
+        original_write = ROUTE_CLI._atomic_write_bytes_at
 
-        def mutate_then_write(path: Path, content: bytes, *args, **kwargs) -> None:
+        def mutate_then_write(directory_fd, name, content, *args, **kwargs) -> None:
             route.write_bytes(route.read_bytes() + b"\n")
-            original_write(path, content, *args, **kwargs)
+            original_write(directory_fd, name, content, *args, **kwargs)
 
         with mock.patch.object(
-            ROUTE_CLI, "_atomic_write_bytes", side_effect=mutate_then_write
+            ROUTE_CLI, "_atomic_write_bytes_at", side_effect=mutate_then_write
         ):
             with self.assertRaisesRegex(ValueError, "changed while generating handoff"):
                 ROUTE_CLI.scaffold_handoff(self.project)
@@ -1042,17 +1042,17 @@ class RouteCliTests(unittest.TestCase):
         self.init_project()
         route = self.project / "ROUTE.md"
         handoff = self.project / "HANDOFF.md"
-        original_replace = Path.replace
+        original_replace = os.replace
         mutated = False
 
-        def mutate_inside_replace(source: Path, target: Path):
+        def mutate_inside_replace(source, target, *args, **kwargs):
             nonlocal mutated
-            if target == handoff and not mutated:
+            if target == "HANDOFF.md" and not mutated:
                 mutated = True
                 route.write_bytes(route.read_bytes() + b"\n")
-            return original_replace(source, target)
+            return original_replace(source, target, *args, **kwargs)
 
-        with mock.patch.object(Path, "replace", mutate_inside_replace):
+        with mock.patch.object(os, "replace", mutate_inside_replace):
             ROUTE_CLI.scaffold_handoff(self.project)
 
         self.assertTrue(mutated)
@@ -1087,8 +1087,97 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(list(external.iterdir()), [])
         self.assertTrue((parked / "claims.guard").is_file())
 
+    def test_work_items_swap_during_new_never_writes_external(self):
+        self.init_project()
+        work_items = self.project / "work-items"
+        parked = self.project / "work-items-open"
+        external = Path(self.temporary_directory.name) / "external-work-items"
+        external.mkdir()
+        original_reserve = ROUTE_CLI._reserve_item_id
+
+        def swap_then_reserve(root_fd, work_items_fd, state_fd):
+            work_items.rename(parked)
+            work_items.symlink_to(external, target_is_directory=True)
+            return original_reserve(root_fd, work_items_fd, state_fd)
+
+        with mock.patch.object(
+            ROUTE_CLI, "_reserve_item_id", side_effect=swap_then_reserve
+        ):
+            ROUTE_CLI.new_work_item(
+                self.project, "Pinned work items", "source", "light", []
+            )
+
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertTrue((parked / "rr-001-pinned-work-items.md").is_file())
+
+    def test_root_swap_keeps_new_claim_handoff_and_validate_coherent(self):
+        for operation in ("new", "claim", "handoff", "validate"):
+            with self.subTest(operation=operation):
+                project = Path(self.temporary_directory.name) / f"root-{operation}"
+                ROUTE_CLI.init_route(project, operation, "en")
+                if operation != "new":
+                    ROUTE_CLI.new_work_item(
+                        project, "Pinned root", "source", "light", []
+                    )
+                parked = project.with_name(f"{project.name}-open")
+                external = project.with_name(f"{project.name}-external")
+                external.mkdir()
+                original_directory = ROUTE_CLI._directory_at
+                swapped = False
+
+                @contextmanager
+                def swap_on_state(parent_fd, name, create=False, missing_ok=False):
+                    nonlocal swapped
+                    if name == ".research-route" and not swapped:
+                        project.rename(parked)
+                        project.symlink_to(external, target_is_directory=True)
+                        swapped = True
+                    with original_directory(
+                        parent_fd, name, create, missing_ok
+                    ) as descriptor:
+                        yield descriptor
+
+                with mock.patch.object(
+                    ROUTE_CLI, "_directory_at", swap_on_state
+                ):
+                    if operation == "new":
+                        ROUTE_CLI.new_work_item(
+                            project, "After root swap", "source", "light", []
+                        )
+                    elif operation == "claim":
+                        ROUTE_CLI.claim_item(project, "rr-001", "agent-a")
+                    elif operation == "handoff":
+                        ROUTE_CLI.scaffold_handoff(project)
+                    else:
+                        self.assertEqual(ROUTE_CLI.validate_route(project), [])
+
+                self.assertEqual(list(external.iterdir()), [])
+                if operation == "new":
+                    self.assertTrue(
+                        (parked / "work-items" / "rr-001-after-root-swap.md").is_file()
+                    )
+                elif operation == "claim":
+                    self.assertTrue(
+                        (parked / ".research-route/claims/rr-001.lock").is_file()
+                    )
+                elif operation == "handoff":
+                    self.assertIn(
+                        "rr-001: Pinned root",
+                        (parked / "HANDOFF.md").read_text(encoding="utf-8"),
+                    )
+
+    def test_descriptor_relative_operations_do_not_leak_file_descriptors(self):
+        self.init_project_with_item()
+        before = len(os.listdir("/dev/fd"))
+
+        for _ in range(10):
+            ROUTE_CLI.validate_route(self.project)
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertEqual(len(os.listdir("/dev/fd")), before)
+
     def test_claim_handoff_validate_and_release_keep_the_open_state(self):
-        for operation in ("claim", "handoff", "validate", "release"):
+        for operation in ("claim", "handoff", "release"):
             with self.subTest(operation=operation):
                 project = Path(self.temporary_directory.name) / operation
                 ROUTE_CLI.init_route(project, operation, "en")
@@ -1467,10 +1556,8 @@ class RouteCliTests(unittest.TestCase):
         self.init_project()
         calls: list[bool] = []
 
-        def migration(root: Path, apply: bool) -> tuple[str, ...]:
+        def migration(root_fd: int, apply: bool) -> tuple[str, ...]:
             calls.append(apply)
-            if apply:
-                (root / "unexpected-mutation").write_text("changed")
             return ("add a future field",)
 
         before = self.project_snapshot()

@@ -68,6 +68,8 @@ Between checkpoints, proceed autonomously only with reversible work inside the a
 
 5. Never overwrite another claim. A stale timestamp is suspicion, not takeover authority; inspect the handoff, recent changes, temporary files, and evidence of an active session before any explicit recovery.
 
+The CLI pins each coordinated operation to one opened project tree, but cannot provide perfect compare-and-swap against non-cooperating editors that rewrite `ROUTE.md`, work items, or `HANDOFF.md` outside its locks; stop concurrent manual edits during publication-critical transitions and validate afterward.
+
 Create traceable work only when needed:
 
 ```bash
