@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
@@ -510,6 +511,44 @@ class RouteCliTests(unittest.TestCase):
         route_metadata, _ = ROUTE_CLI.parse_frontmatter(self.project / "ROUTE.md")
         self.assertEqual(route_metadata["next_work_item"], 3)
 
+    def test_new_holds_guard_until_item_is_published(self):
+        self.init_project()
+        item_write_started = threading.Event()
+        allow_item_write = threading.Event()
+        handoff_finished = threading.Event()
+        original_write = ROUTE_CLI._write_exclusive
+
+        def delayed_write(path, content, mode):
+            if path.suffix == ".md":
+                item_write_started.set()
+                self.assertTrue(allow_item_write.wait(2))
+            return original_write(path, content, mode)
+
+        with mock.patch.object(ROUTE_CLI, "_write_exclusive", delayed_write):
+            creator = threading.Thread(
+                target=ROUTE_CLI.new_work_item,
+                args=(self.project, "Guarded publication", "source", "light", []),
+            )
+            creator.start()
+            self.assertTrue(item_write_started.wait(2))
+            handoff = threading.Thread(
+                target=lambda: (
+                    ROUTE_CLI.scaffold_handoff(self.project),
+                    handoff_finished.set(),
+                )
+            )
+            handoff.start()
+            self.assertFalse(handoff_finished.wait(0.2))
+            allow_item_write.set()
+            creator.join(2)
+            handoff.join(2)
+
+        self.assertTrue(handoff_finished.is_set())
+        self.assertIn(
+            "rr-001: Guarded publication",
+            (self.project / "HANDOFF.md").read_text(encoding="utf-8"),
+        )
+
     def test_release_guard_prevents_deleting_a_replacement_claim(self):
         self.init_project_with_item()
         ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
@@ -517,11 +556,11 @@ class RouteCliTests(unittest.TestCase):
         release_has_read = threading.Event()
         allow_release = threading.Event()
         replacement_finished = threading.Event()
-        original_read_text = Path.read_text
+        original_read_text = ROUTE_CLI._read_regular_text_at
 
-        def delayed_read_text(path, *args, **kwargs):
-            text = original_read_text(path, *args, **kwargs)
-            if path == lock and threading.current_thread().name == "releaser":
+        def delayed_read_text(directory_fd, name):
+            text = original_read_text(directory_fd, name)
+            if name == "rr-001.lock" and threading.current_thread().name == "releaser":
                 release_has_read.set()
                 self.assertTrue(allow_release.wait(2))
             return text
@@ -538,7 +577,7 @@ class RouteCliTests(unittest.TestCase):
             ROUTE_CLI.claim_item(self.project, "rr-001", "agent-c")
             replacement_finished.set()
 
-        with mock.patch.object(Path, "read_text", delayed_read_text):
+        with mock.patch.object(ROUTE_CLI, "_read_regular_text_at", delayed_read_text):
             releaser = threading.Thread(target=release_old_claim, name="releaser")
             releaser.start()
             self.assertTrue(release_has_read.wait(2))
@@ -935,6 +974,14 @@ class RouteCliTests(unittest.TestCase):
                 + (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
                 text,
             ),
+            lambda text: text.replace(
+                "### Blocks\n\n", "### Blocks\n\n### Blocks\n\n", 1
+            ),
+            lambda text: re.sub(
+                r"(?m)^- Generated at: .+$",
+                "- Generated at: 9999-12-31T23:59:59.999999+23:59",
+                text,
+            ),
         )
         for index, corrupt in enumerate(corruptions):
             with self.subTest(index=index):
@@ -990,6 +1037,100 @@ class RouteCliTests(unittest.TestCase):
                 ROUTE_CLI.scaffold_handoff(self.project)
 
         self.assertEqual(handoff.read_bytes(), before)
+
+    def test_handoff_retries_when_route_changes_inside_replace(self):
+        self.init_project()
+        route = self.project / "ROUTE.md"
+        handoff = self.project / "HANDOFF.md"
+        original_replace = Path.replace
+        mutated = False
+
+        def mutate_inside_replace(source: Path, target: Path):
+            nonlocal mutated
+            if target == handoff and not mutated:
+                mutated = True
+                route.write_bytes(route.read_bytes() + b"\n")
+            return original_replace(source, target)
+
+        with mock.patch.object(Path, "replace", mutate_inside_replace):
+            ROUTE_CLI.scaffold_handoff(self.project)
+
+        self.assertTrue(mutated)
+        codes = {issue.code for issue in ROUTE_CLI.validate_route(self.project)}
+        self.assertNotIn("stale-handoff", codes)
+
+    def test_state_swap_after_open_never_touches_symlink_target(self):
+        self.init_project()
+        state = self.project / ".research-route"
+        parked = self.project / ".research-route-open"
+        external = Path(self.temporary_directory.name) / "external-swapped-state"
+        external.mkdir()
+        original_guard = ROUTE_CLI._claim_guard
+        swapped = False
+
+        @contextmanager
+        def swap_then_guard(state_fd):
+            nonlocal swapped
+            if not swapped:
+                state.rename(parked)
+                state.symlink_to(external, target_is_directory=True)
+                swapped = True
+            with original_guard(state_fd):
+                yield
+
+        with mock.patch.object(ROUTE_CLI, "_claim_guard", swap_then_guard):
+            item = ROUTE_CLI.new_work_item(
+                self.project, "Safe state swap", "source", "light", []
+            )
+
+        self.assertTrue(item.is_file())
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertTrue((parked / "claims.guard").is_file())
+
+    def test_claim_handoff_validate_and_release_keep_the_open_state(self):
+        for operation in ("claim", "handoff", "validate", "release"):
+            with self.subTest(operation=operation):
+                project = Path(self.temporary_directory.name) / operation
+                ROUTE_CLI.init_route(project, operation, "en")
+                ROUTE_CLI.new_work_item(
+                    project, "Descriptor state", "source", "light", []
+                )
+                if operation != "claim":
+                    ROUTE_CLI.claim_item(project, "rr-001", "agent-a")
+                state = project / ".research-route"
+                parked = project / ".research-route-open"
+                external = Path(self.temporary_directory.name) / f"external-{operation}"
+                external.mkdir()
+                original_state = ROUTE_CLI._state_directory_fd
+
+                @contextmanager
+                def swap_open_state(root, create=False, missing_ok=False):
+                    with original_state(root, create, missing_ok) as state_fd:
+                        state.rename(parked)
+                        state.symlink_to(external, target_is_directory=True)
+                        yield state_fd
+
+                with mock.patch.object(
+                    ROUTE_CLI, "_state_directory_fd", swap_open_state
+                ):
+                    if operation == "claim":
+                        ROUTE_CLI.claim_item(project, "rr-001", "agent-a")
+                    elif operation == "handoff":
+                        handoff = ROUTE_CLI.scaffold_handoff(project)
+                        self.assertIn(
+                            "rr-001: agent-a", handoff.read_text(encoding="utf-8")
+                        )
+                    elif operation == "validate":
+                        self.assertNotIn(
+                            "invalid-claim",
+                            {issue.code for issue in ROUTE_CLI.validate_route(project)},
+                        )
+                    else:
+                        ROUTE_CLI.release_item(project, "rr-001", "agent-a")
+
+                self.assertEqual(list(external.iterdir()), [])
+                claim = parked / "claims" / "rr-001.lock"
+                self.assertEqual(claim.exists(), operation != "release")
 
     def test_state_symlink_is_rejected_by_validate_handoff_and_claim(self):
         self.init_project_with_item()
