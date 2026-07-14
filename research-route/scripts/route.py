@@ -5,12 +5,26 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 
 TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "assets" / "route-template"
 FRONTMATTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)")
+
+
+def _is_supported_value(value: object) -> bool:
+    return (
+        value is None
+        or type(value) is int
+        or isinstance(value, str)
+        or isinstance(value, list)
+        and all(
+            item is None or type(item) is int or isinstance(item, str)
+            for item in value
+        )
+    )
 
 
 def _parse_scalar(value: str) -> object:
@@ -26,10 +40,7 @@ def _parse_scalar(value: str) -> object:
         return value[1:-1].replace("''", "'")
     if value.startswith("[") and value.endswith("]"):
         parsed = json.loads(value)
-        if isinstance(parsed, list) and all(
-            item is None or type(item) is int or isinstance(item, str)
-            for item in parsed
-        ):
+        if isinstance(parsed, list) and _is_supported_value(parsed):
             return parsed
     raise ValueError(f"unsupported frontmatter scalar: {value!r}")
 
@@ -63,9 +74,7 @@ def _format_scalar(value: object) -> str:
         return str(value)
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, list) and all(
-        item is None or type(item) is int or isinstance(item, str) for item in value
-    ):
+    if isinstance(value, list) and _is_supported_value(value):
         return json.dumps(value, ensure_ascii=False)
     raise ValueError(f"unsupported frontmatter value: {value!r}")
 
@@ -81,22 +90,50 @@ def write_frontmatter(
     lines.append("---\n")
     lines.append(body)
 
-    temporary_path = path.with_name(f".{path.name}.tmp")
-    temporary_path.write_text("".join(lines), encoding="utf-8")
-    temporary_path.replace(path)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write("".join(lines))
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def init_route(destination: Path, title: str, language: str) -> Path:
-    if destination.exists() and any(destination.iterdir()):
+    if destination.exists() and (
+        not destination.is_dir() or any(destination.iterdir())
+    ):
         raise FileExistsError(f"destination is not empty: {destination}")
 
-    shutil.copytree(TEMPLATE_ROOT, destination, dirs_exist_ok=True)
-    route_path = destination / "ROUTE.md"
-    metadata, body = parse_frontmatter(route_path)
-    metadata["project_title"] = title
-    metadata["language"] = language
-    write_frontmatter(route_path, metadata, body)
-    return route_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+        )
+    )
+    try:
+        shutil.copytree(TEMPLATE_ROOT, staging, dirs_exist_ok=True)
+        staged_route = staging / "ROUTE.md"
+        metadata, body = parse_frontmatter(staged_route)
+        metadata["project_title"] = title
+        metadata["language"] = language
+        write_frontmatter(staged_route, metadata, body)
+        staging.replace(destination)
+        return destination / "ROUTE.md"
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def _build_parser() -> argparse.ArgumentParser:
