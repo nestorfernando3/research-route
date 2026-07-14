@@ -18,6 +18,8 @@ Build a rigorous, portable academic-paper project whose evidence, decisions, ope
 
 Set `<skill-dir>` to this skill's directory and `<root>` to the research-project directory.
 
+`<root>` is user-supplied or detected from an existing project and must be outside `<skill-dir>`. Never initialize project state inside the installed skill package. If no project root is available, return proposed state updates only, state that persistence awaits an external empty destination, and still make the highest-value safe intellectual action—not directory selection—the exact next action.
+
 1. Detect whether `<root>/ROUTE.md` exists.
 2. If it exists, resume: read `<root>/ROUTE.md` and `<root>/HANDOFF.md` first. Resolve conflicts in favor of `ROUTE.md`, flag the discrepancy, and open only artifacts linked to the current objective.
 3. If it does not exist, require an empty destination and initialize it:
@@ -74,7 +76,7 @@ python3 <skill-dir>/scripts/route.py new --root <root> --title "<title>" --type 
 
 ## Persist and close
 
-Save the result in its canonical artifact; update affected source cards, claims, decisions, contradictions, fog, blocks, budget, frontier, and `ROUTE.md` links or concise summaries. Close the work-item metadata when its closure condition is met, then release its claim:
+Save the result in its canonical artifact: source records in `sources/`, claims in `CLAIMS.md`, decisions in `DECISIONS.md`, contradictions and fog in `INQUIRY.md`, and blocks, budget, frontier, links, and concise summaries in `ROUTE.md`. Never invent parallel state files such as `CONTRADICTIONS.md` or `FOG.md`, and never persist literal path placeholders. Close the work-item metadata when its closure condition is met, then release its claim:
 
 ```bash
 python3 <skill-dir>/scripts/route.py release <item-id> --root <root> --owner <owner>
@@ -109,4 +111,4 @@ Use prohibition plus a concrete counter only for genuine discipline risks:
 - **Consequential checkpoint omitted:** keep the replacement thesis, target venue, contribution, method/corpus/interpretive strategy, reflexive positioning, or submission version proposed until the corresponding researcher approval is recorded.
 - **Contribution opposition omitted:** test nearest neighbors, the strongest rival interpretation, simpler explanations, and adverse evidence before asking for contribution approval.
 - **Stopping condition omitted:** state what evidence would close, narrow, or block comparison, search, or transformation work; a time box ends activity, not uncertainty.
-- **Bilingual propagation omitted:** link every consequential term decision to affected claims, evidence, inference, and thesis consequences; escalate conceptually hybrid cases to the researcher.
+- **Bilingual propagation omitted:** show in the returned terminology ledger and persist links from every consequential term decision to affected claims, evidence, inference, and thesis consequences; escalate conceptually hybrid cases to the researcher.

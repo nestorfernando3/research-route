@@ -32,7 +32,7 @@ Log database or collection, exact query, filters, date, counts where useful, scr
 
 Record the highest access actually inspected: `metadata | abstract | excerpt | full text | dataset | primary material`. Never let a search snippet, abstract, secondary citation, or plausible title masquerade as full-text evidence.
 
-Create one card in `sources/` per consulted source:
+Create one card in `sources/` per consulted source. Inspect existing cards, allocate the next unused stable key in the form `S-NN`, and name the file `S-NN-short-title.md`; use the real allocated key in every link and never write a literal placeholder such as `sources/<source-key>.md`. If no project root exists yet, describe the proposed source card without supplying any filename; allocate its real key only after initialization.
 
 ```markdown
 # <source key and title>
