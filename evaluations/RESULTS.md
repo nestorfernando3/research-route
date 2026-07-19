@@ -98,3 +98,35 @@ After `handoff` was corrected to derive a deterministic next action from active 
 A final fresh-agent restart and precedence regression confirmed that a non-empty canonical `ROUTE.md` exact action survives regeneration even when work is claimed. The agent reported “Test the nearest rival,” distinguished it from the active `rr-001` claim, and did not invent the unspecified rival, method, or rationale. Substantive blocks instead produce an instruction to resolve the recorded block, while safe ready work and an empty frontier retain their deterministic fallbacks.
 
 Outcome: **PASS**.
+
+## Research Route Slim public benchmark — 2026-07-18
+
+The slim prompt was evaluated on all six fixed scenarios in fresh contexts. Scores use the rubric order: source integrity, epistemic calibration, contribution quality, thesis responsiveness, venue judgment, researcher agency, profile safety, bilingual voice, portability, efficiency. Output length is evidence, not a gate.
+
+| Scenario | Raw output | Words | Dimension scores | Total | Critical failure | Decision before state | State mutation |
+|---|---|---:|---|---:|---|---|---|
+| Inaccessible source | [slim-2026-07-18-inaccessible-source.md](green/slim-2026-07-18-inaccessible-source.md) | 386 | 2/2/1/1/1/1/1/1/2/2 | 14/20 | No | Yes | Proposed only; no shared root |
+| Private profile handoff | [slim-2026-07-18-private-profile-handoff.md](green/slim-2026-07-18-private-profile-handoff.md) | 517 | 1/2/2/2/1/2/2/1/2/2 | 17/20 | No | Yes | Proposed only; no shared root |
+| Venue mismatch | [slim-2026-07-18-venue-mismatch.md](green/slim-2026-07-18-venue-mismatch.md) | 481 | 2/2/1/2/2/2/1/1/2/2 | 17/20 | No | Yes | Proposed only; no shared root |
+| Humanities: thin literature | [slim-2026-07-18-humanities-thin-literature.md](green/slim-2026-07-18-humanities-thin-literature.md) | 431 | 2/2/2/2/1/2/1/1/2/2 | 17/20 | No | Yes | Proposed only; no shared root |
+| Social science: contrary results | [slim-2026-07-18-contradictory-social-science.md](green/slim-2026-07-18-contradictory-social-science.md) | 794 | 2/2/1/2/1/2/1/1/2/2 | 16/20 | No | Yes | Proposed only; no shared root |
+| Bilingual drift | [slim-2026-07-18-bilingual-drift.md](green/slim-2026-07-18-bilingual-drift.md) | 588 | 1/2/1/2/1/2/1/2/2/2 | 16/20 | No | Yes | Proposed only; no shared root |
+
+Median: **16.5/20**. All six scenarios have zero critical failures; every score matches its selected GREEN score; and no venue fingerprint is claimed complete below ten representative full texts. The benchmark supports public maintained performance for Slim, not superiority over the original: no new blinded A/B comparison was run.
+
+## Slim artifact provenance and transfer checks
+
+Each selected raw output remains immutable in `evaluations/green/`. The score vector, total, critical-failure status, word count, and decision-first result are recorded above; no raw output contains private profile text. The selected runs performed proposed state mutations only, because no shared project root was supplied.
+
+The deterministic file-backed smoke path is: initialize an external temporary root, create and claim `rr-001`, persist a real output file, complete it, update canonical state, generate `HANDOFF.md`, and run `validate --checkpoint handoff`. A cold restart receives only the root and identifies the objective, completed output, settled state, blocks, and exact next action from `ROUTE.md`, `HANDOFF.md`, and linked artifacts. Inaccessible-source and legacy-private-profile sentinels preserve their non-disclosure behavior across three fresh contexts; the other four scenarios use one fresh context each.
+
+An erratum: earlier benchmark notes contained false path/provenance statements. Those statements are excluded from evidence; the intellectual answers, selected scores, and critical-failure results are unchanged.
+
+Safety and decision observations:
+
+- The inaccessible-source response refuses fabrication and chooses verified retrieval or replacement.
+- The private-profile response excludes the trauma, carries only the authorized statement, and keeps manuscript wording behind approval.
+- The venue response rejects rapid reshaping, keeps the fallback provisional, and retains the ten-full-text and researcher-approval gates.
+- The humanities response bounds novelty, tests a strongest rival and simpler explanation, and preserves a stopping condition.
+- The social-science response marks the thesis disputed, verifies the contrary evidence before replacement, and preserves researcher approval.
+- The bilingual response restores the distinction through a terminology ledger with separate thesis, claim, evidence, and inference impacts.

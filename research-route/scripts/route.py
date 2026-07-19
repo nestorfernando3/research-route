@@ -96,18 +96,6 @@ class ValidationIssue:
     message: str
 
 
-@dataclass(frozen=True)
-class MigrationPlan:
-    current_version: int
-    target_version: int
-    changes: tuple[str, ...]
-    applicable: bool
-
-
-Migration = Callable[[int, bool], tuple[str, ...]]
-MIGRATIONS: dict[tuple[int, int], Migration] = {}
-
-
 def _atomic_write_bytes_at(
     directory_fd: int,
     name: str,
@@ -672,6 +660,107 @@ def release_item(
                 os.unlink(f"{item_id}.lock", dir_fd=claims_fd)
 
 
+def _normalize_output_path(output: str) -> str:
+    if not isinstance(output, str) or not output.strip() or "\x00" in output:
+        raise ValueError("output must be a non-empty project-relative path")
+    candidate = output.strip().replace("\\", "/")
+    if candidate.startswith("/") or re.match(r"^[A-Za-z]:", candidate):
+        raise ValueError("output must be a non-empty project-relative path")
+    if ".." in candidate.split("/"):
+        raise ValueError("output must be a normalized project-relative path")
+    normalized = posixpath.normpath(candidate)
+    if normalized in {"", "."} or normalized.startswith("../"):
+        raise ValueError("output must be a normalized project-relative path")
+    return normalized
+
+
+def _output_is_regular_file(root_fd: int, output: str) -> bool:
+    try:
+        with _relative_parent_fd(root_fd, output) as (parent_fd, name):
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                return stat.S_ISREG(os.fstat(descriptor).st_mode)
+            finally:
+                os.close(descriptor)
+    except (OSError, ValueError):
+        return False
+
+
+def complete_item(root: Path, item_id: str, owner: str, output: str) -> Path:
+    _validate_item_id(item_id)
+    if not owner:
+        raise ValueError("owner must not be empty")
+    normalized_output = _normalize_output_path(output)
+    with _state_directory_fd(root) as (root_fd, state_fd):
+        assert state_fd is not None
+        with _claim_guard(state_fd):
+            _require_file_at(root_fd, root, "ROUTE.md")
+            _parse_frontmatter_at(root_fd, "ROUTE.md")
+            with _directory_at(root_fd, "work-items") as work_items_fd:
+                assert work_items_fd is not None
+                item_name = _item_name_at(work_items_fd, item_id)
+                item_path = root / "work-items" / item_name
+                item, body = _parse_frontmatter_at(
+                    work_items_fd, item_name, item_path
+                )
+                record_errors = _work_item_record_errors(item)
+                if record_errors:
+                    raise ValueError(
+                        f"invalid work item {item_path}: {record_errors[0][1]}"
+                    )
+                if not _output_is_regular_file(root_fd, normalized_output):
+                    raise ValueError(
+                        "output must resolve to an existing regular file inside the project root"
+                    )
+                with _directory_at(state_fd, "claims") as claims_fd:
+                    claim_name = f"{item_id}.lock"
+                    if not _exists_at(claims_fd, claim_name):
+                        raise ValueError(f"work item is not claimed: {item_id}")
+                    try:
+                        claim = json.loads(
+                            _read_regular_text_at(claims_fd, claim_name)
+                        )
+                    except (ValueError, json.JSONDecodeError) as error:
+                        raise ValueError(f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {error}") from None
+                    claim_errors = _claim_record_errors(claim)
+                    if claim_errors:
+                        raise ValueError(
+                            f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {claim_errors[0]}"
+                        )
+                    assert isinstance(claim, dict)
+                    identity_errors = _claim_identity_errors(claim, item_id)
+                    if identity_errors:
+                        raise ValueError(
+                            f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {identity_errors[0][1]}"
+                        )
+                    if claim.get("owner") != owner:
+                        raise ValueError(
+                            f"claim belongs to {claim.get('owner')}, not {owner}"
+                        )
+                    if item.get("status") == "closed":
+                        if item.get("owner") != owner or item.get("output") != normalized_output:
+                            raise ValueError(
+                                "closed work item does not match the completing owner and output"
+                            )
+                        os.unlink(claim_name, dir_fd=claims_fd)
+                        return item_path
+                    if item.get("status") != "open":
+                        raise ValueError(f"unsupported work-item status: {item.get('status')}")
+                    item["status"] = "closed"
+                    item["owner"] = owner
+                    item["output"] = normalized_output
+                    _write_frontmatter_at(work_items_fd, item_name, item, body)
+                    os.unlink(claim_name, dir_fd=claims_fd)
+                    return item_path
+
+
 def _relative_path(root: Path, path: Path) -> str:
     try:
         return path.relative_to(root).as_posix()
@@ -957,7 +1046,14 @@ def _validate_markdown_links(
             (*markdown_files, *_markdown_files_at(work_items_fd, "work-items"))
         )
     for relative_path, text in markdown_files:
-        for match in MARKDOWN_LINK.finditer(text):
+        link_text = text
+        if relative_path == "RESEARCHER.md":
+            link_text = re.sub(
+                r"(?ms)(^## Private[ \t]*\r?\n).*?(?=^## |\Z)",
+                r"\1",
+                text,
+            )
+        for match in MARKDOWN_LINK.finditer(link_text):
             destination = match.group(1).strip()
             if destination.startswith("<") and ">" in destination:
                 destination = destination[1 : destination.index(">")]
@@ -974,16 +1070,16 @@ def _validate_markdown_links(
                     )
                 )
         definitions: dict[str, str] = {}
-        for match in REFERENCE_DEFINITION.finditer(text):
+        for match in REFERENCE_DEFINITION.finditer(link_text):
             label = _reference_label(match.group(1))
             definitions.setdefault(label, match.group(2) or match.group(3))
         references = {
             _reference_label(match.group(2) or match.group(1))
-            for match in REFERENCE_LINK.finditer(text)
+            for match in REFERENCE_LINK.finditer(link_text)
         }
         references.update(
             label
-            for match in SHORTCUT_REFERENCE.finditer(text)
+            for match in SHORTCUT_REFERENCE.finditer(link_text)
             if (label := _reference_label(match.group(1))) in definitions
         )
         for label in sorted(references):
@@ -1093,7 +1189,102 @@ def _handoff_freshness_issue(root_fd: int) -> ValidationIssue | None:
     )
 
 
-def validate_route(root: Path) -> list[ValidationIssue]:
+def _section_content(body: str, heading: str) -> tuple[str | None, bool]:
+    matches = re.findall(
+        rf"(?ms)^## {re.escape(heading)}[ \t]*\r?\n(.*?)(?=^## |\Z)",
+        body,
+    )
+    return (matches[0].strip(), len(matches) == 1) if len(matches) == 1 else (None, bool(matches))
+
+
+def _has_declared_text(content: str | None) -> bool:
+    if content is None:
+        return False
+    content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL).strip()
+    return any(character.isalnum() for character in content)
+
+
+def _privacy_issue(root_fd: int) -> ValidationIssue | None:
+    if not stat.S_ISREG(_relative_kind_at(root_fd, "RESEARCHER.md") or 0):
+        return None
+    try:
+        body = _read_regular_text_at(root_fd, "RESEARCHER.md")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    private, present = _section_content(body, "Private")
+    private_text = re.sub(r"<!--.*?-->", "", private or "", flags=re.DOTALL).strip()
+    if present and _has_declared_text(private) and private_text.casefold() not in {"none", "- none"}:
+        return ValidationIssue(
+            "privacy-boundary",
+            "RESEARCHER.md",
+            "legacy Private content must be relocated or deleted outside the portable project root",
+        )
+    return None
+
+
+def _handoff_checkpoint_issues(root_fd: int) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        _, route_body = _parse_frontmatter_at(root_fd, "ROUTE.md")
+    except (OSError, UnicodeError, ValueError):
+        route_body = ""
+    destination, destination_heading = _section_content(route_body, "Destination")
+    if not destination_heading or not _has_declared_text(destination) or destination.casefold() in {"none", "- none"}:
+        issues.append(
+            ValidationIssue(
+                "handoff-checkpoint",
+                "ROUTE.md",
+                "Destination must contain a non-empty objective",
+            )
+        )
+    next_action, next_action_heading = _section_content(route_body, "Exact next action")
+    if (
+        not next_action_heading
+        or not _has_declared_text(next_action)
+        or next_action.casefold() in {"none", "- none"}
+    ):
+        issues.append(
+            ValidationIssue(
+                "handoff-checkpoint",
+                "ROUTE.md",
+                "Exact next action must be non-empty and canonical",
+            )
+        )
+    try:
+        handoff = _read_regular_text_at(root_fd, "HANDOFF.md")
+    except (OSError, UnicodeError, ValueError):
+        handoff = ""
+    intellectual_sections = (
+        "Intellectual change",
+        "Invalidated assumptions",
+        "Live contradiction",
+        "Researcher decisions needed",
+        "Exact next action and why",
+    )
+    for heading in intellectual_sections:
+        content, present = _section_content(handoff, heading)
+        if not present or not _has_declared_text(content):
+            issues.append(
+                ValidationIssue(
+                    "handoff-checkpoint",
+                    "HANDOFF.md",
+                    f"{heading} must declare content or say - None",
+                )
+            )
+        elif heading == "Exact next action and why" and content.casefold() in {"none", "- none"}:
+            issues.append(
+                ValidationIssue(
+                    "handoff-checkpoint",
+                    "HANDOFF.md",
+                    "Exact next action and why must contain a next action",
+                )
+            )
+    return issues
+
+
+def validate_route(root: Path, checkpoint: str | None = None) -> list[ValidationIssue]:
+    if checkpoint not in {None, "handoff"}:
+        raise ValueError(f"unsupported validation checkpoint: {checkpoint}")
     try:
         root_fd = os.open(root, DIRECTORY_FLAGS)
     except OSError:
@@ -1101,9 +1292,9 @@ def validate_route(root: Path) -> list[ValidationIssue]:
     try:
         try:
             with _directory_at(root_fd, ".research-route", missing_ok=True) as state_fd:
-                return _validate_route_at(root, root_fd, state_fd)
+                return _validate_route_at(root, root_fd, state_fd, checkpoint)
         except ValueError:
-            issues = _validate_route_at(root, root_fd, None)
+            issues = _validate_route_at(root, root_fd, None, checkpoint)
             issues.append(
                 ValidationIssue(
                     "invalid-claim",
@@ -1119,14 +1310,14 @@ def validate_route(root: Path) -> list[ValidationIssue]:
 
 
 def _validate_route_at(
-    root: Path, root_fd: int, state_fd: int | None
+    root: Path, root_fd: int, state_fd: int | None, checkpoint: str | None
 ) -> list[ValidationIssue]:
     try:
         work_items_fd = os.open("work-items", DIRECTORY_FLAGS, dir_fd=root_fd)
     except OSError:
-        return _validate_route_contents_at(root, root_fd, state_fd, None)
+        return _validate_route_contents_at(root, root_fd, state_fd, None, checkpoint)
     try:
-        return _validate_route_contents_at(root, root_fd, state_fd, work_items_fd)
+        return _validate_route_contents_at(root, root_fd, state_fd, work_items_fd, checkpoint)
     finally:
         os.close(work_items_fd)
 
@@ -1136,6 +1327,7 @@ def _validate_route_contents_at(
     root_fd: int,
     state_fd: int | None,
     work_items_fd: int | None,
+    checkpoint: str | None,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
 
@@ -1359,6 +1551,11 @@ def _validate_route_contents_at(
         handoff_issue = _handoff_freshness_issue(root_fd)
         if handoff_issue is not None:
             issues.append(handoff_issue)
+    privacy_issue = _privacy_issue(root_fd)
+    if privacy_issue is not None:
+        issues.append(privacy_issue)
+    if checkpoint == "handoff":
+        issues.extend(_handoff_checkpoint_issues(root_fd))
     _validate_markdown_links(root_fd, issues, work_items_fd)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
@@ -1567,44 +1764,6 @@ def scaffold_handoff(root: Path) -> Path:
     raise AssertionError("unreachable")
 
 
-def migrate_route(root: Path, target_version: int, apply: bool) -> MigrationPlan:
-    with _state_directory_fd(
-        root, create=apply, missing_ok=not apply
-    ) as (root_fd, state_fd):
-        _require_file_at(root_fd, root, "ROUTE.md")
-        metadata, _ = _parse_frontmatter_at(root_fd, "ROUTE.md")
-        current_version = metadata.get("schema_version")
-        if type(current_version) is not int:
-            raise ValueError("ROUTE.md schema_version must be an integer")
-        if current_version > PROJECT_SCHEMA_VERSION:
-            return MigrationPlan(
-                current_version,
-                target_version,
-                (f"unsupported current schema version {current_version}",),
-                False,
-            )
-        if target_version == current_version:
-            return MigrationPlan(current_version, target_version, (), True)
-        migration = MIGRATIONS.get((current_version, target_version))
-        if migration is None:
-            return MigrationPlan(
-                current_version,
-                target_version,
-                (
-                    f"no migration from schema version {current_version} "
-                    f"to {target_version}",
-                ),
-                False,
-            )
-        if apply:
-            assert state_fd is not None
-            with _claim_guard(state_fd):
-                changes = migration(root_fd, True)
-        else:
-            changes = migration(root_fd, False)
-    return MigrationPlan(current_version, target_version, changes, True)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="route.py")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1632,15 +1791,23 @@ def _build_parser() -> argparse.ArgumentParser:
     release_parser.add_argument("--root", type=Path, required=True)
     release_parser.add_argument("--owner", required=True)
     release_parser.add_argument("--force", action="store_true")
-    validate_parser = commands.add_parser("validate")
+    complete_parser = commands.add_parser(
+        "complete", help="close an owned work item and persist its output"
+    )
+    complete_parser.add_argument("item_id")
+    complete_parser.add_argument("--root", type=Path, required=True)
+    complete_parser.add_argument("--owner", required=True)
+    complete_parser.add_argument("--output", required=True)
+    validate_parser = commands.add_parser(
+        "validate", help="check structural integrity; use --checkpoint handoff for transfer readiness"
+    )
     validate_parser.add_argument("--root", type=Path, required=True)
     validate_parser.add_argument("--json", action="store_true")
+    validate_parser.add_argument(
+        "--checkpoint", choices=("handoff",), help="run deterministic handoff readiness checks"
+    )
     handoff_parser = commands.add_parser("handoff")
     handoff_parser.add_argument("--root", type=Path, required=True)
-    migrate_parser = commands.add_parser("migrate")
-    migrate_parser.add_argument("--root", type=Path, required=True)
-    migrate_parser.add_argument("--to", type=int, required=True, dest="target_version")
-    migrate_parser.add_argument("--apply", action="store_true")
     return parser
 
 
@@ -1668,8 +1835,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"warning: forcibly released claim for {arguments.item_id}",
                     file=sys.stderr,
                 )
+        elif arguments.command == "complete":
+            complete_item(
+                arguments.root,
+                arguments.item_id,
+                arguments.owner,
+                arguments.output,
+            )
         elif arguments.command == "validate":
-            issues = validate_route(arguments.root)
+            issues = validate_route(arguments.root, arguments.checkpoint)
             if arguments.json:
                 print(json.dumps([asdict(issue) for issue in issues], ensure_ascii=False))
             else:
@@ -1678,20 +1852,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if issues else 0
         elif arguments.command == "handoff":
             scaffold_handoff(arguments.root)
-        elif arguments.command == "migrate":
-            plan = migrate_route(
-                arguments.root, arguments.target_version, arguments.apply
-            )
-            if arguments.apply and not plan.applicable:
-                print("error: refusing to apply unknown migration", file=sys.stderr)
-            if plan.current_version == plan.target_version:
-                print(f"already at schema version {plan.current_version}")
-            else:
-                if plan.applicable and not arguments.apply:
-                    print("dry run; no files modified")
-                for change in plan.changes:
-                    print(change)
-            return 0 if plan.applicable else 1
     except (FileExistsError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
