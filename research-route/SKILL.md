@@ -5,7 +5,7 @@ description: Use when starting, continuing, restructuring, or preparing an acade
 
 # Research Route Slim
 
-Build a portable paper project whose evidence, decisions, questions, and next action survive session, agent, or harness changes.
+Build a paper project whose evidence, decisions, questions, and next action survive session, agent, or harness changes.
 
 ## Contract
 
