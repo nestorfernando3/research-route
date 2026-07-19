@@ -326,6 +326,112 @@ class RouteCliTests(unittest.TestCase):
         self.assertEqual(owner_release.returncode, 0, owner_release.stderr)
         self.assertFalse(lock.exists())
 
+    def test_init_researcher_template_has_no_private_section(self):
+        self.init_project()
+        researcher = (self.project / "RESEARCHER.md").read_text(encoding="utf-8")
+        self.assertNotIn("## Private", researcher)
+        self.assertIn("outside this portable", researcher)
+
+    def test_legacy_private_content_is_a_non_disclosing_validation_error(self):
+        self.init_project()
+        secret = "private trauma that must not be echoed"
+        researcher = self.project / "RESEARCHER.md"
+        researcher.write_text(
+            researcher.read_text(encoding="utf-8").replace(
+                "## Operational",
+                f"## Private\n\n{secret}\n\n[secret](missing-private.md)\n\n## Operational",
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.run_cli("validate", "--root", str(self.project))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("privacy-boundary", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+        self.assertNotIn(secret, result.stderr)
+
+    def test_complete_closes_owned_item_and_records_real_output(self):
+        self.init_project_with_item()
+        output = self.project / "manuscript" / "result.md"
+        output.write_text("finished", encoding="utf-8")
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+
+        item = ROUTE_CLI.complete_item(
+            self.project, "rr-001", "agent-a", "manuscript/result.md"
+        )
+
+        metadata, _ = ROUTE_CLI.parse_frontmatter(item)
+        self.assertEqual(metadata["status"], "closed")
+        self.assertEqual(metadata["owner"], "agent-a")
+        self.assertEqual(metadata["output"], "manuscript/result.md")
+        self.assertFalse(
+            (self.project / ".research-route" / "claims" / "rr-001.lock").exists()
+        )
+
+    def test_complete_rejects_invalid_output_without_mutation(self):
+        self.init_project_with_item()
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        item = self.project / "work-items" / "rr-001-map-rival-accounts.md"
+        before = item.read_bytes()
+        for output in ("", "../outside.md", "/tmp/out.md", "missing.md"):
+            with self.subTest(output=output):
+                with self.assertRaises(ValueError):
+                    ROUTE_CLI.complete_item(self.project, "rr-001", "agent-a", output)
+                self.assertEqual(item.read_bytes(), before)
+
+    def test_complete_retry_removes_residual_claim_after_metadata_write(self):
+        self.init_project_with_item()
+        output = self.project / "result.md"
+        output.write_text("finished", encoding="utf-8")
+        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
+        original_unlink = ROUTE_CLI.os.unlink
+
+        def interrupt(path, *args, **kwargs):
+            if path == "rr-001.lock":
+                raise RuntimeError("simulated interruption")
+            return original_unlink(path, *args, **kwargs)
+
+        with mock.patch.object(ROUTE_CLI.os, "unlink", side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, "simulated interruption"):
+                ROUTE_CLI.complete_item(self.project, "rr-001", "agent-a", "result.md")
+        ROUTE_CLI.complete_item(self.project, "rr-001", "agent-a", "result.md")
+        self.assertFalse(
+            (self.project / ".research-route" / "claims" / "rr-001.lock").exists()
+        )
+
+    def test_handoff_checkpoint_requires_declared_transfer_state(self):
+        self.init_project()
+        self.assertEqual(ROUTE_CLI.validate_route(self.project), [])
+        route = self.project / "ROUTE.md"
+        metadata, body = ROUTE_CLI.parse_frontmatter(route)
+        body = body.replace(
+            "## Destination\n\n## Contribution provisional",
+            "## Destination\n\nA paper objective.\n\n## Contribution provisional",
+        ).replace(
+            "## Exact next action\n",
+            "## Exact next action\n\nReview the first source.\n",
+        )
+        ROUTE_CLI.write_frontmatter(route, metadata, body)
+        handoff = self.project / "HANDOFF.md"
+        handoff.write_text(
+            handoff.read_text(encoding="utf-8")
+            + "\n- None\n",
+            encoding="utf-8",
+        )
+        ROUTE_CLI.scaffold_handoff(self.project)
+        checkpoint = ROUTE_CLI.validate_route(self.project, "handoff")
+        self.assertTrue(
+            any(issue.code == "handoff-checkpoint" for issue in checkpoint)
+        )
+
+    def test_cli_help_exposes_lifecycle_without_migrate(self):
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0)
+        for command in ("new", "claim", "complete", "release", "validate", "handoff"):
+            self.assertIn(command, result.stdout)
+        self.assertNotIn("migrate", result.stdout)
+
     def test_claim_requires_open_work_with_closed_dependencies(self):
         self.init_project()
         dependency = ROUTE_CLI.new_work_item(
@@ -1280,7 +1386,6 @@ class RouteCliTests(unittest.TestCase):
             lambda: ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a"),
             lambda: ROUTE_CLI.release_item(self.project, "rr-001", "agent-a"),
             lambda: ROUTE_CLI.scaffold_handoff(self.project),
-            lambda: ROUTE_CLI.migrate_route(self.project, 1, False),
         )
         for operation in operations:
             with self.subTest(operation=operation):
@@ -1604,70 +1709,6 @@ class RouteCliTests(unittest.TestCase):
         self.assertIn(b"rr-001", mechanical)
         self.assertIn(b"Generated at", mechanical)
         self.assertIn(b"ROUTE.md modified", mechanical)
-
-    def test_migrate_current_version_is_a_non_mutating_no_op(self):
-        self.init_project_with_item()
-        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
-        before = self.project_snapshot()
-
-        result = self.run_cli("migrate", "--root", str(self.project), "--to", "1")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("already at schema version 1", result.stdout)
-        self.assertEqual(self.project_snapshot(), before)
-
-    def test_migrate_refuses_unsupported_future_project_without_mutation(self):
-        self.init_project_with_item()
-        route = self.project / "ROUTE.md"
-        metadata, body = ROUTE_CLI.parse_frontmatter(route)
-        metadata["schema_version"] = 99
-        ROUTE_CLI.write_frontmatter(route, metadata, body)
-        before = self.project_snapshot()
-
-        result = self.run_cli("migrate", "--root", str(self.project), "--to", "1")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unsupported current schema version 99", result.stdout)
-        self.assertEqual(self.project_snapshot(), before)
-
-    def test_migrate_is_a_dry_run_by_default(self):
-        self.init_project()
-        calls: list[bool] = []
-
-        def migration(root_fd: int, apply: bool) -> tuple[str, ...]:
-            calls.append(apply)
-            return ("add a future field",)
-
-        before = self.project_snapshot()
-        stdout = io.StringIO()
-        with mock.patch.dict(ROUTE_CLI.MIGRATIONS, {(1, 2): migration}):
-            with mock.patch("sys.stdout", stdout):
-                returncode = ROUTE_CLI.main(
-                    ["migrate", "--root", str(self.project), "--to", "2"]
-                )
-
-        self.assertEqual(returncode, 0)
-        self.assertEqual(calls, [False])
-        self.assertIn("dry run", stdout.getvalue().lower())
-        self.assertEqual(self.project_snapshot(), before)
-
-    def test_migrate_explicitly_refuses_to_apply_unknown_migration(self):
-        self.init_project_with_item()
-        ROUTE_CLI.claim_item(self.project, "rr-001", "agent-a")
-        before = self.project_snapshot()
-
-        result = self.run_cli(
-            "migrate",
-            "--root",
-            str(self.project),
-            "--to",
-            "2",
-            "--apply",
-        )
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("refusing to apply unknown migration", result.stderr.lower())
-        self.assertEqual(self.project_snapshot(), before)
 
     def test_handoff_lists_route_state_claims_and_blocks(self):
         self.init_project_with_item()

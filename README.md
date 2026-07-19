@@ -4,7 +4,7 @@
   <img src="assets/research-route-logo.png" alt="Research Route logo" width="720">
 </p>
 
-Research Route Slim is a compact academic-writing skill for turning a research question into a durable paper project that can survive agent switches, harness changes, and long revision cycles.
+Research Route Slim is a compact academic-writing skill for sustained paper projects: it turns a research question into durable state that can survive agent switches, harness changes, and long revision cycles. It is not intended for isolated proofreading, citation formatting, one-off summaries, or narrow lookups unless the user explicitly names Research Route.
 
 It is tuned primarily for humanities and social-science prose and argument, but it works anywhere the work depends on judgment, source discipline, and editorial fit.
 
@@ -12,7 +12,7 @@ It is tuned primarily for humanities and social-science prose and argument, but 
 
 Research Route Slim is not a one-shot prompt. It is a compact route for building a paper with structure, memory, and accountability:
 
-- it helps you shape a researcher profile before drafting;
+- it helps you record optional epistemic and authorial orientation when it materially serves the project;
 - it helps you choose and test a journal or venue before you overfit the paper;
 - it keeps claims, evidence, decisions, and open questions in canonical Markdown state;
 - it helps you write in a human voice without pretending to be human;
@@ -26,7 +26,7 @@ The goal is not just speed. The goal is a paper that can actually be defended: o
 
 ## What It Helps You Do
 
-- build a philosophical or psychological researcher profile with private, operational, and publishable boundaries;
+- record authorized epistemic and authorial orientation while keeping private material outside the portable project root and hosted prompts;
 - choose a target venue and fingerprint its tone, scope, and expectations from representative full-text articles;
 - test the paper against nearest neighbors, strongest rivals, and simpler explanations before calling it novel;
 - preserve project state in `ROUTE.md`, `HANDOFF.md`, claims, decisions, and source cards;
@@ -42,6 +42,8 @@ The goal is not just speed. The goal is a paper that can actually be defended: o
 - A contribution laboratory that pressure-tests novelty before it becomes prose.
 - Bilingual voice support for humanities and social-science writing.
 - A small standard-library Python CLI for the mechanical parts of project state.
+
+The CLI supports the documented lifecycle `new → claim → work → complete`; `release` relinquishes unfinished work. Structural validation checks file shape and consistency only. `validate --checkpoint handoff` adds deterministic transfer checks, but does not establish originality, evidence quality, ethics approval, venue fit, or submission readiness.
 
 ## Installation
 
@@ -84,10 +86,12 @@ The slim prompt was checked with three critical safety sentinels covering inacce
 
 At the time of writing:
 
-- prompt size: `800 words`
+- prompt size: `681 words`
 - sentinel median: `17 / 20`
 - critical failures: `0`
-- the full six-scenario benchmark remains outside this slim publication's claim
+- selected six-scenario benchmark evidence is recorded in `evaluations/RESULTS.md`; it is not a superiority claim
+
+The CLI is tested on macOS and Linux using `fcntl` and descriptor-relative POSIX operations. Windows support is not claimed.
 
 ## Limits
 
@@ -95,6 +99,6 @@ Research Route Slim does not guarantee acceptance, publication, or novelty.
 
 It does not fabricate inaccessible sources, quotes, pages, or findings.
 
-It does not expose private profile material unless the researcher explicitly authorizes publishable wording.
+It does not invite private profile material into portable state or expose it in diagnostics. Separately approved publishable wording must still be authored and approved by the researcher.
 
 It does not bypass journal policies or replace the author’s intellectual responsibility.
