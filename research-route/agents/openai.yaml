@@ -1,4 +1,4 @@
 interface:
-  display_name: "Research Route"
-  short_description: "Build rigorous, original academic papers"
-  default_prompt: "Use $research-route to chart and advance a rigorous academic paper."
+  display_name: "Research Route Slim"
+  short_description: "Advance academic papers with a compact safety-first route"
+  default_prompt: "Use $research-route-slim to chart and advance an academic paper."

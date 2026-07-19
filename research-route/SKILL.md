@@ -1,9 +1,9 @@
 ---
-name: research-route
+name: research-route-slim
 description: Use when starting, continuing, restructuring, or preparing an academic paper or publication project, especially when the work spans literature, sources, argument, methodology, venue fit, bilingual prose, or transfer between agents and harnesses.
 ---
 
-# Research Route
+# Research Route Slim
 
 Build a portable paper project whose evidence, decisions, questions, and next action survive session, agent, or harness changes.
 
