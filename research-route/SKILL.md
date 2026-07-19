@@ -5,86 +5,61 @@ description: Use when starting, continuing, restructuring, or preparing an acade
 
 # Research Route
 
-Build a rigorous, portable academic-paper project whose evidence, decisions, open questions, and next action survive changes of session, agent, or harness.
+Build a portable paper project whose evidence, decisions, questions, and next action survive session, agent, or harness changes.
 
-## Core contract
+## Contract
 
-- Keep critical state in project files, not only in chat or memory. Treat `ROUTE.md` as canonical low-resolution state and `HANDOFF.md` as a session snapshot that never overrides it.
-- Advance discovery and manuscript composition together through linked claims, evidence, decisions, and prose. Let evidence reopen the venue, thesis, method, corpus, interpretation, or scope.
-- Store concise, auditable rationales, not hidden reasoning. Put each substantive result in its canonical artifact and update links or summaries; never duplicate the full prose across files.
-- Protect researcher agency, privacy, source integrity, rights, and applicable institutional or venue obligations. Verify current policies when they matter; do not encode mutable policy details as timeless facts.
+- Keep critical state in project files. `ROUTE.md` is canonical state; `HANDOFF.md` is a session snapshot and never overrides it.
+- Work toward one primary objective. Decisions remain reopenable when evidence, review, ethics, scope, method, thesis, or venue fit changes.
+- Persist concise, auditable rationales and links, not hidden reasoning or duplicated prose. Protect researcher agency, privacy, source integrity, rights, and current obligations.
+- Report the intellectual result first; unless full state is requested, report only material uncertainty, needed approval or block, and exact next action.
 
-## Start or resume
+## Start/resume
 
-Set `<skill-dir>` to this skill's directory and `<root>` to the research-project directory.
+Set `<skill-dir>` to this directory and `<root>` to the research-project directory. `<root>` must be outside `<skill-dir>`; never initialize there.
 
-`<root>` is user-supplied or detected from an existing project and must be outside `<skill-dir>`. Never initialize project state inside the installed skill package. If no project root is available, return proposed state updates only, state that persistence awaits an external empty destination, and still make the highest-value safe intellectual action—not directory selection—the exact next action.
-
-1. Detect whether `<root>/ROUTE.md` exists.
-2. If it exists, resume: read `<root>/ROUTE.md` and `<root>/HANDOFF.md` first. Resolve conflicts in favor of `ROUTE.md`, flag the discrepancy, and open only artifacts linked to the current objective.
-3. If it does not exist, require an empty destination and initialize it:
+1. If `<root>/ROUTE.md` exists, read `ROUTE.md` and `HANDOFF.md` first. Resolve conflicts in favor of `ROUTE.md`, flag the discrepancy, and open only artifacts linked to objective.
+2. Otherwise require an empty destination and initialize it:
 
    ```bash
    python3 <skill-dir>/scripts/route.py init <root> --title "<project title>" --language <language>
    ```
 
-4. Confirm one primary intellectual objective for the session and whether its output is exploratory or publication-bound.
-5. Before collecting, accessing, recording, transmitting, scraping, or analyzing participants, personal data, sensitive archives or corpora, Indigenous or community-governed material, protected or copyrighted material, or restricted sources, run the early ethics gate in [research-and-claims.md](references/research-and-claims.md). Block the work until applicable consent or ethics review, permissions and community/archive terms, storage and security, and AI-tool transmission conditions are recorded and satisfied.
+   Without an external root, propose state updates, mark persistence pending, and take the highest-value safe action.
+3. Confirm objective and output type.
+4. Before collecting, accessing, recording, transmitting, scraping, or analyzing participants, personal data, sensitive, Indigenous, community-governed, protected, copyrighted, or restricted material, run the early ethics gate in [research-and-claims.md](references/research-and-claims.md). Block work until consent or review, permissions/governance, storage/security, and AI-transmission conditions are recorded and satisfied.
 
-## Cover the route
+## Work
 
-Move recursively through three cycles:
+- Advance discovery, argument, and composition through linked claims, evidence, decisions, and prose; let evidence reopen material decisions.
+- Consider only open, unblocked work with closed dependencies. Choose the highest decision value per cost. Use `light` rigor for reversible exploration and `deep` rigor for thesis, decisive evidence, method, interpretation, quotations, novelty, and publication-bound text.
+- Claim before working and never overwrite another claim:
 
-- **Discover:** situate the researcher; investigate questions, literature, materials, rivals, methods, and provisional venue.
-- **Argue:** form claims; connect evidence; expose inference; test alternatives; calibrate contribution.
-- **Compose:** design and revise architecture, bilingual voice, argument movement, and editorial fit.
+  ```bash
+  python3 <skill-dir>/scripts/route.py claim <item-id> --root <root> --owner <owner>
+  ```
 
-Cover nine stations without forcing a sequence: researcher orientation; provisional venue selection; venue fingerprint construction; contribution formulation; debate and literature mapping; methodological or interpretive design; argument development; writing and rewriting; audit and submission preparation. Reopen earlier cycles when evidence or review changes a material decision.
+- Persist each result in its canonical artifact: sources in `sources/`, claims in `CLAIMS.md`, decisions in `DECISIONS.md`, contradictions and fog in `INQUIRY.md`, and blocks, budget, frontier, links, and summaries in `ROUTE.md`. Do not invent parallel state files or literal path placeholders. Close completed work metadata and release the claim:
 
-## Preserve human authority
+  ```bash
+  python3 <skill-dir>/scripts/route.py release <item-id> --root <root> --owner <owner>
+  ```
 
-Obtain explicit researcher approval at every mandatory checkpoint:
+## Quality gates
 
-- initial epistemic profile;
-- provisional target venue;
-- first defensible contribution statement;
-- consequential method, corpus, or interpretive strategy;
-- stabilized central thesis;
-- any proposed conversion of private profile material into publishable reflexive positioning: the researcher must first relabel it locally and supply only the newly `publishable` content, then approve the exact manuscript wording; while labeled `private`, a hosted or external agent never reads it;
-- version proposed for submission.
+- **Integrity and calibration:** distinguish access level, observation, source interpretation, inference, support, dispute, and non-verification. Never fabricate or silently complete citations, DOI, pages, quotations, findings, data, or unseen text. If access is blocked, record consequences and obtain the source, narrow the claim, use an attributed abstract-level statement, or replace it.
+- **Responsiveness and contribution:** test nearest neighbors, the strongest rival, simpler explanations, and adverse evidence before contribution or thesis approval. Let results change the claim, method, scope, or thesis.
+- **Venue and approvals:** treat venue as provisional. A complete fingerprint requires at least ten representative full texts; fewer is provisional. Obtain explicit researcher approval for the initial profile, target venue, first defensible contribution, consequential method/corpus/interpretation, stabilized thesis, any private-to-publishable reflexive positioning, and submission version.
+- **Privacy and stopping:** private profile material never enters a hosted/external handoff or manuscript. Use only researcher-authored, authorized operational consequences or separately approved publishable content; exact manuscript wording requires separate approval. State what evidence would close, narrow, or block each search, comparison, or transformation. A time box ends activity, not uncertainty; stop when uncertainty is declared non-fatal, or ethics, access, or a checkpoint blocks responsible work.
+- **Bilingual propagation:** preserve meaning, entailment, uncertainty, evidence strength, argumentative function, and authorial voice across Spanish and English. For each consequential terminology decision, return a terminology ledger and persist separate thesis, claim, evidence, and inference impacts; use `pending real ID` only beside a concrete consequence, and escalate conceptually hybrid cases to the researcher.
 
-Between checkpoints, proceed autonomously only with reversible work inside the approved scope. Record the decision, concise rationale, residual uncertainty, and reopening condition in the canonical project state.
+## References
 
-## Choose and claim frontier work
+Read the needed reference: [researcher-profile.md](references/researcher-profile.md) for profiles, approvals, and reflexive positioning; [venue-fingerprint.md](references/venue-fingerprint.md) for candidates, sampling, requirements, fit, and retargeting; [research-and-claims.md](references/research-and-claims.md) for searches, sources, access, claims, contribution, adversarial work, rigor, and stopping; [writing-and-review.md](references/writing-and-review.md) for bilingual voice, terminology, drafting, revision, review, ethics, and submission artifacts.
 
-1. Consider only work items that are `open`, have all dependencies closed, and are neither blocked nor claimed.
-2. Prefer the item with the greatest expected decision value: important uncertainty reduction relative to estimated cost. Use this as a judgment heuristic, not a fake precision score.
-3. Select **light** rigor for exploration, alternatives, provisional prose, and other reversible work. Select **deep** rigor for thesis, decisive evidence, method or interpretation, quotations, novelty, and publication-bound text; increase rigor when error consequences are high or reversal is costly.
-4. Claim before working:
+## Close
 
-   ```bash
-   python3 <skill-dir>/scripts/route.py claim <item-id> --root <root> --owner <owner>
-   ```
-
-5. Never overwrite another claim. A stale timestamp is suspicion, not takeover authority; inspect the handoff, recent changes, temporary files, and evidence of an active session before any explicit recovery.
-
-The CLI pins each coordinated operation to one opened project tree, but cannot provide perfect compare-and-swap against non-cooperating editors that rewrite `ROUTE.md`, work items, or `HANDOFF.md` outside its locks; stop concurrent manual edits during publication-critical transitions and validate afterward.
-
-Create traceable work only when needed:
-
-```bash
-python3 <skill-dir>/scripts/route.py new --root <root> --title "<title>" --type <question|source|synthesis|decision|writing|audit|human-checkpoint> --mode <light|deep> [--depends-on <item-id>]
-```
-
-## Persist and close
-
-Save the result in its canonical artifact: source records in `sources/`, claims in `CLAIMS.md`, decisions in `DECISIONS.md`, contradictions and fog in `INQUIRY.md`, and blocks, budget, frontier, links, and concise summaries in `ROUTE.md`. Never invent parallel state files such as `CONTRADICTIONS.md` or `FOG.md`, and never persist literal path placeholders. Close the work-item metadata when its closure condition is met, then release its claim:
-
-```bash
-python3 <skill-dir>/scripts/route.py release <item-id> --root <root> --owner <owner>
-```
-
-At every session close, update the intellectual sections of `HANDOFF.md`, then run:
+Update `HANDOFF.md`'s intellectual sections, excluding private profile material, and leave the exact next action plus why it has highest value. Then run:
 
 ```bash
 python3 <skill-dir>/scripts/route.py validate --root <root>
@@ -92,25 +67,4 @@ python3 <skill-dir>/scripts/route.py handoff --root <root>
 python3 <skill-dir>/scripts/route.py validate --root <root>
 ```
 
-Leave the exact next action and why it has highest value. Exclude private profile material. At major checkpoints or intentional transfer, cold-test whether a fresh agent can distinguish settled decisions, reopenable questions, blocks, and executable frontier work from `ROUTE.md`, `HANDOFF.md`, and their links.
-
-## Load the exact reference
-
-- Read [researcher-profile.md](references/researcher-profile.md) for profile interviews, classification, approvals, version comparison, or reflexive positioning.
-- Read [venue-fingerprint.md](references/venue-fingerprint.md) for candidates, sampling, venue requirements, fit, or retargeting.
-- Read [research-and-claims.md](references/research-and-claims.md) for searches, source cards, access, claims, contribution testing, adversarial work, rigor, or stopping.
-- Read [writing-and-review.md](references/writing-and-review.md) for bilingual voice, terminology, drafting, revision, review simulation, ethics audit, or submission artifacts.
-
-## Respond to observed RED
-
-Use prohibition plus a concrete counter only for genuine discipline risks:
-
-- **“The abstract makes the missing quotation reconstructable.”** No. Never fabricate or silently complete references, DOI, pages, quotations, findings, data, source content, or unseen full text. Record the access block, use only what the inspected access level supports, and obtain the source or replace it.
-- **“The next agent needs the private story.”** No. A hosted or external agent never receives `private` answers. The researcher self-records them locally and supplies only a researcher-authored, authorized operational consequence. A truly local/offline harness may process private material only with explicit authorization and must exclude it from handoff and manuscript.
-
-### Observed omissions → required recipe
-
-- **Consequential checkpoint omitted:** keep the replacement thesis, target venue, contribution, method/corpus/interpretive strategy, reflexive positioning, or submission version proposed until the corresponding researcher approval is recorded.
-- **Contribution opposition omitted:** test nearest neighbors, the strongest rival interpretation, simpler explanations, and adverse evidence before asking for contribution approval.
-- **Stopping condition omitted:** state what evidence would close, narrow, or block comparison, search, or transformation work; a time box ends activity, not uncertainty.
-- **Bilingual propagation omitted:** show in the returned terminology ledger and persist separate thesis-impact, claim, evidence, and inference links for every consequential term decision; if real IDs are unavailable, `pending real ID` is valid only beside the concrete consequence for each field; escalate conceptually hybrid cases to the researcher.
+Before release, recheck current ethics, permissions, rights, privacy, authorship, disclosure, and applicable policies. Cold-test at major checkpoints or transfer that a fresh agent can distinguish settled decisions, reopenable questions, blocks, and executable frontier work from `ROUTE.md`, `HANDOFF.md`, and linked artifacts. Report release, validation, handoff, any material block or approval, and the exact next action; never include private material.
