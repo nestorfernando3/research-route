@@ -4,7 +4,7 @@
   <img src="assets/research-route-logo.png" alt="Research Route logo" width="720">
 </p>
 
-Research Route Slim is a compact academic-writing skill for sustained paper projects: it turns a research question into durable state that can survive agent switches, harness changes, and long revision cycles. It is not intended for isolated proofreading, citation formatting, one-off summaries, or narrow lookups unless the user explicitly names Research Route.
+Research Route Slim is a compact, adaptive academic-writing skill for sustained paper projects: it turns a research question into durable state that can survive agent switches, harness changes, and long revision cycles while batching non-critical review work. It is not intended for isolated proofreading, citation formatting, one-off summaries, or narrow lookups unless the user explicitly names Research Route.
 
 It is tuned primarily for humanities and social-science prose and argument, but it works anywhere the work depends on judgment, source discipline, and editorial fit.
 
@@ -13,7 +13,7 @@ It is tuned primarily for humanities and social-science prose and argument, but 
 Research Route Slim is not a one-shot prompt. It is a compact route for building a paper with structure, memory, and accountability:
 
 - it helps you record optional epistemic and authorial orientation when it materially serves the project;
-- it helps you choose and test a journal or venue before you overfit the paper;
+- it helps you orient to a journal quickly and complete the full venue fingerprint before submission;
 - it keeps claims, evidence, decisions, and open questions in canonical Markdown state;
 - it helps you write in a human voice without pretending to be human;
 - it keeps the project portable so another agent or harness can continue it cleanly.
@@ -42,8 +42,11 @@ The goal is not just speed. The goal is a paper that can actually be defended: o
 - A contribution laboratory that pressure-tests novelty before it becomes prose.
 - Bilingual voice support for humanities and social-science writing.
 - A small standard-library Python CLI for the mechanical parts of project state.
+- Adaptive risk levels that keep critical verification immediate and batch material review into argument and release passes.
 
-The CLI supports the documented lifecycle `new → claim → work → complete`; `release` relinquishes unfinished work. Structural validation checks file shape and consistency only. `validate --checkpoint handoff` adds deterministic transfer checks, but does not establish originality, evidence quality, ethics approval, venue fit, or submission readiness.
+The CLI supports the detailed lifecycle `new`, `claim`, `complete`, and `release`, plus the compact `advance` path for routine work. Structural validation checks file shape and consistency only. Focused checkpoints cover argument, research, prose, venue, handoff, release, and submission; only submission composes scholarly gates and exact-version approval.
+
+New projects should initialize with `--schema-version 2`. The default `init` mode remains schema v1 for compatibility with older automation; migrate legacy roots explicitly after a dry run.
 
 ## Installation
 
@@ -86,7 +89,7 @@ The slim prompt was checked with three critical safety sentinels covering inacce
 
 At the time of writing:
 
-- prompt size: `681 words`
+- prompt size: below `800 words`
 - sentinel median: `17 / 20`
 - critical failures: `0`
 - selected six-scenario benchmark evidence is recorded in `evaluations/RESULTS.md`; it is not a superiority claim

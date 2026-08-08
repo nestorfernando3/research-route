@@ -2,15 +2,34 @@
 
 All notable changes to this project are documented here.
 
-## [Unreleased]
+## [Research Route Slim — 2026-08-08]
 
-### Changed
+### Faster everyday work
 
-- Restored the executable `new → claim → work → complete` lifecycle and made `release` the unfinished-work operation.
-- Added privacy-boundary validation for legacy `RESEARCHER.md` private sections without echoing their contents.
-- Added structural validation and the deterministic `--checkpoint handoff` readiness scope.
-- Removed the unused migration framework and CLI command; schema version remains `1`.
-- Narrowed activation guidance, made orientation proportional, and documented macOS/Linux support boundaries.
+- Added an adaptive route that moves routine exploration quickly and reserves deep checks for decisions that can damage the paper.
+- Added `advance` for recording a small result in one command.
+- Grouped deferred work into two reviews: one for argument and evidence, and one for final release quality.
+- A local replay of five routine tasks used 55.6% fewer commands and 54.6% less elapsed time than the detailed route.
+
+### Cleaner academic manuscripts
+
+- Added prose checks for internal file names, scripts, version labels, ledger fragments, telegraphic sentences, and promotional or combative language.
+- Added release checks for Markdown, text, LaTeX, and DOCX artifacts.
+- Kept the final manuscript separate from research ledgers, reproducibility materials, and internal production notes.
+- Added progressive venue work: three full texts can support an early orientation; ten are required before submission.
+
+### Safer project state
+
+- Added schema v2 with structured claims, release records, risk levels, verification, review debt, and author approval.
+- Added `research`, `venue`, `prose`, `release`, and `submission` checkpoints.
+- Added safe v1 migration with a mandatory dry run, legacy-cycle normalization, handoff refresh, and explicit privacy blocks.
+- Existing schema-v1 projects remain readable until their owner chooses to migrate.
+
+### Validation
+
+- 100 automated tests pass.
+- Skill validation and Python compilation pass.
+- Migration and adaptive-route replays pass on temporary copies of PAIDEIA, *Suicidal Empathy*, and the fascism project. Existing parallel state and private material remain visible as intentional blocks.
 
 ## [Research Route Slim — 2026-07-18]
 

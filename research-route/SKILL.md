@@ -1,67 +1,90 @@
 ---
 name: research-route-slim
-description: Use for sustained or multi-stage academic paper projects involving durable research state, venue or contribution work, bilingual argument revision, or transfer between agents and harnesses. Do not activate for isolated proofreading, citation formatting, one-off summaries, or narrow lookups unless the user names Research Route.
+description: Use for sustained or multi-stage academic paper projects involving durable research state, venue or contribution work, bilingual argument revision, publication-bound prose, or transfer between agents and harnesses. Use the adaptive route to move quickly through reversible work and batch non-critical review debt. Do not activate for isolated proofreading, citation formatting, one-off summaries, or narrow lookups unless the user names Research Route.
 ---
 
 # Research Route Slim
 
-Build a paper project whose evidence, decisions, questions, and next action survive session, agent, or harness changes.
+Maintain a portable academic project while matching rigor to consequence, reversibility, and correction cost.
 
 ## Contract
 
-- Keep critical state in project files. `ROUTE.md` is canonical; `HANDOFF.md` is a session snapshot and never overrides it.
-- Work toward one primary objective. Keep decisions reopenable when evidence, ethics, scope, method, thesis, or venue fit changes.
-- Persist concise, auditable rationales and links, not hidden reasoning or duplicated prose. Protect researcher agency, privacy, source integrity, rights, and obligations.
-- Report the intellectual result first, then material uncertainty, approval or block, and the exact next action.
+- Keep canonical state in the external project root. `ROUTE.md` governs; `HANDOFF.md` transfers a snapshot and never overrides it.
+- Keep four layers separate: research state, reproducible materials, academic manuscript, and editorial release package.
+- Preserve researcher agency, privacy, source integrity, rights, authorship, and accountable AI disclosure.
+- Report the intellectual result first, then uncertainty, block or approval, and the exact next action.
 
 ## Start or resume
 
-Set `<skill-dir>` to this directory and `<root>` to an external research-project directory. Never initialize inside the skill package.
-
-1. If `<root>/ROUTE.md` exists, read `ROUTE.md` and `HANDOFF.md` first. Resolve conflicts in favor of `ROUTE.md`, flag the discrepancy, and open only artifacts linked to the objective.
-2. Otherwise require an empty destination and initialize it:
-
-   ```bash
-   python3 <skill-dir>/scripts/route.py init <root> --title "<project title>" --language <language>
-   ```
-
-3. Confirm objective and output type. Researcher epistemic and authorial orientation is optional and proportional to methodological or authorial need; private material stays outside the portable root and external prompts.
-4. Before handling participants, personal, sensitive, Indigenous, community-governed, protected, copyrighted, or restricted material, run the early ethics gate in `references/research-and-claims.md` and block until consent, governance, storage, and AI-transmission conditions are recorded.
-
-## Work and lifecycle
-
-Advance discovery, argument, and composition through linked claims, evidence, decisions, and prose. Choose open, unblocked work by decision value per cost. Use `light` rigor for reversible exploration and `deep` rigor for thesis, decisive evidence, method, interpretation, quotation, novelty, and publication-bound text.
-
-Create, claim, work, and complete items in this order:
+Set `<skill-dir>` to this directory and `<root>` to an external project directory. Never initialize inside the skill package.
 
 ```bash
-python3 <skill-dir>/scripts/route.py new --root <root> --title "<title>" --type <type> --mode <light|deep>
-python3 <skill-dir>/scripts/route.py claim <item-id> --root <root> --owner <owner>
-python3 <skill-dir>/scripts/route.py complete <item-id> --root <root> --owner <owner> --output <relative-path>
+python3 <skill-dir>/scripts/route.py init <root> --title "<title>" --language <language> --schema-version 2
 ```
 
-`complete` requires the active claim, the same owner, and an existing regular file inside `<root>`; it closes the item, records its normalized output path, atomically persists metadata, and releases the claim. Use `release` to relinquish unfinished work. Never overwrite another claim.
+For a legacy root, run `migrate --dry-run` before `migrate --apply`. Read `ROUTE.md` and `HANDOFF.md`, then open only artifacts linked to the objective. Keep private material outside the portable root and external prompts.
 
-Persist sources in `sources/`, claims in `CLAIMS.md`, decisions in `DECISIONS.md`, contradictions and fog in `INQUIRY.md`, and blocks, frontier, links, and summaries in `ROUTE.md`. Do not invent parallel state files or literal path placeholders.
+Before handling participants, personal, sensitive, Indigenous, community-governed, protected, copyrighted, or restricted material, complete the early ethics gate in `references/research-and-claims.md`. Critical work cannot be deferred.
 
-## Quality gates
+## Adaptive route
 
-Distinguish access, observation, interpretation, inference, support, dispute, and non-verification. Never fabricate citations, pages, quotations, findings, data, or unseen text. Test nearest neighbors, the strongest rival, simpler explanations, and adverse evidence before contribution or thesis approval. A venue fingerprint is provisional until at least ten representative full texts are read. Obtain researcher approval for consequential profile, venue, contribution, method, thesis, reflexive-position, and submission decisions. Preserve meaning, entailment, uncertainty, evidence strength, argumentative function, and voice across Spanish and English.
+Classify work as `routine`, `material`, or `critical`.
+
+- `routine`: exploration, organization, provisional outlines, low-consequence wording, and reversible searches. Record it with the short path:
+
+  ```bash
+  python3 <skill-dir>/scripts/route.py advance --root <root> --title "<title>" --type <type> --owner <owner> --output <path> --review-later
+  ```
+
+- `material`: synthesis, secondary claims, venue orientation, method framing, and substantial prose. Accumulate it for the argument review.
+- `critical`: ethics, privacy, source access, quotations, decisive claims, method, results, rights, authorial decisions, and submission. Verify immediately and never pass it through `--review-later`.
+
+Use `new`, `claim`, `complete`, and `release` for shared or long-running work. A provisional item remains resumable and does not satisfy dependencies until verified.
+
+Record complete source cards only for cited, decisive, or adverse sources. Keep candidate sources to verified identity, access level, and selection or discard reason. Track substantive claims in `claims/C-NNN-<slug>.md` with one of `supported | inferred | provisional | disputed | unverified`.
+
+## Two joint reviews
+
+Run the grouped argument review before stabilizing thesis, method, or publication-bound sections:
+
+```bash
+python3 <skill-dir>/scripts/route.py review --root <root> --stage argument
+```
+
+Resolve claims, evidence, inferences, rivals, method, and material review debt together. Run the release review for prosa, continuity, ethics, rights, references, venue, AI disclosure, artifacts, and final author approval:
+
+```bash
+python3 <skill-dir>/scripts/route.py review --root <root> --stage release
+```
+
+Use `light` rigor for reversible work and `deep` rigor for critical work. Merge editor, sympathetic-reviewer, and skeptical-reviewer perspectives into the grouped reviews; run independent adversarial passes only when a critical threat appears.
+
+## Venue and validation
+
+Use three full texts plus current official requirements for provisional venue orientation. Require ten representative full texts, stratified evidence, classification of conclusions, and researcher approval only before submission.
+
+Run focused checkpoints:
+
+```bash
+python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint argument
+python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint prose --release <id>
+python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint venue
+python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint submission --release <id>
+```
+
+`prose` checks Markdown, text, LaTeX, and DOCX for internal routes, hashes, IDs, scripts, version labels, draft language, ledger fragments, telegraphic sentences, and promotional or combative register. It skips code, tables, formulas, bibliography, headings, and metadata. Scripts detect and verify; they do not rewrite prose. Correct findings or record an author-approved exception tied to the artifact hash.
+
+The clean-room review receives only the manuscript, venue guide, verified claims, and authorized voice profile. A release must show complete academic sentences, explicit connectors, continuous reasoning, and no unjustified production scaffolding. AI disclosure states functions, verification, and responsibility without narrating prompts, skills, scripts, or Codex internals.
 
 ## Close and transfer
 
-Update `HANDOFF.md`'s intellectual sections without private profile material, and leave the exact next action plus why it has highest value. Then run structural validation and handoff generation:
+Before release, recheck current ethics, permissions, rights, privacy, authorship, disclosure, and policy requirements. Then generate and validate the handoff:
 
 ```bash
-python3 <skill-dir>/scripts/route.py validate --root <root>
 python3 <skill-dir>/scripts/route.py handoff --root <root>
 python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint handoff
 ```
 
-The default `validate` checks structural integrity only. The `handoff` checkpoint additionally requires a non-empty `ROUTE.md` `Destination`, a canonical exact next action, and declared content in every intellectual handoff section (`- None` is valid where no change applies, but not for the exact next action). It does not establish originality, evidence quality, ethics approval, venue fit, or submission readiness; those remain human or reference-driven gates.
+Structural validation reports structural integrity only. `submission` composes structural, handoff, research, prose, venue, ethics, bibliography, review, and exact-version approval; it blocks every unresolved critical or material debt.
 
-Before release, recheck current ethics, permissions, rights, privacy, authorship, disclosure, and applicable policies. Cold-test major transfers so a fresh agent can distinguish settled decisions, reopenable questions, blocks, and executable frontier work from `ROUTE.md`, `HANDOFF.md`, and linked artifacts.
-
-## References
-
-Read only what the task needs: `researcher-profile.md`, `venue-fingerprint.md`, `research-and-claims.md`, and `writing-and-review.md`.
+Read only the references needed for the active decision: `researcher-profile.md`, `venue-fingerprint.md`, `research-and-claims.md`, and `writing-and-review.md`.

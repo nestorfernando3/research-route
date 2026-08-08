@@ -1,4 +1,4 @@
 interface:
   display_name: "Research Route Slim"
-  short_description: "Advance academic papers with a compact safety-first route"
-  default_prompt: "Use $research-route-slim to chart and advance an academic paper."
+  short_description: "Advance academic papers with adaptive rigor and grouped review"
+  default_prompt: "Use $research-route-slim to advance an academic paper quickly while preserving critical evidence and release checks."
