@@ -58,7 +58,7 @@ Resolve argument advancement, evidence and claim calibration, researcher positio
 
 Resolve voice and prose movement, editorial fit, verbal independence, terminology, ethics, permissions, authorship, references, AI disclosure, venue requirements, and exact-version integrity together. Use editor, sympathetic-reviewer, and skeptical-reviewer perspectives inside the same record. Run an independent adversarial pass only when a critical threat appears.
 
-The release review must confirm that the manuscript contains complete academic sentences, explicit connectors, continuous paragraph logic, and no internal pipeline labels. A script may detect patterns; it must not rewrite the manuscript.
+The release review must confirm that the manuscript contains complete academic sentences, explicit connectors, continuous paragraph logic, and no internal pipeline labels. When the article needs a literature-search or verification account, rewrite the relevant procedure as scholarly method: identify the sources searched, selection criteria, date range, access limits that constrain claims, and stopping rationale. Keep local filenames and paths, source-card or work-item identifiers, file counts, access-state labels, agent actions, and pending-work instructions in the research state. A script may detect patterns; it must not rewrite the manuscript.
 
 After a pass that changes thesis, contribution, method, corpus, venue, proposed profile-permission relabeling or approved reflexive positioning, or submission version, return to the appropriate researcher checkpoint. Never draft from material while it remains labeled `private`.
 

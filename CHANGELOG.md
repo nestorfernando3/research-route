@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+### Cleaner release prose
+
+- Blocked local research paths, bibliography and matrix filenames, source-card and work-item identifiers, access-state labels, and pending-verification language from publication prose.
+- Required search and verification history to be rewritten as scholarly method before release.
+- Added a regression case based on an observed traceability leak in a rendered manuscript.
+
+### Stronger argument and release gates
+
+- Required structured claim records at argument and release checkpoints, reconciled `CLAIMS.md` with `claims/`, and linked claim evidence to existing source cards.
+- Blocked unresolved manuscript-targeted claims and orphan PDF, DOCX, and HTML artifacts at release.
+- Checked release scaffolding and declared word counts against the artifact.
+- Added seven regression tests for claim reconciliation, source access, unresolved claims, orphan artifacts, release scaffolding, and word counts; the suite now passes 108 tests.
+
 ## [Research Route Slim — 2026-08-08]
 
 ### Faster everyday work

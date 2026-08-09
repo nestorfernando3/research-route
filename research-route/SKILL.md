@@ -41,7 +41,7 @@ Classify work as `routine`, `material`, or `critical`.
 
 Use `new`, `claim`, `complete`, and `release` for shared or long-running work. A provisional item remains resumable and does not satisfy dependencies until verified.
 
-Record complete source cards only for cited, decisive, or adverse sources. Keep candidate sources to verified identity, access level, and selection or discard reason. Track substantive claims in `claims/C-NNN-<slug>.md` with one of `supported | inferred | provisional | disputed | unverified`.
+Record complete source cards only for cited, decisive, or adverse sources. Keep candidate sources to verified identity, access level, and selection or discard reason. Track substantive claims in `claims/C-NNN-<slug>.md` with one of `supported | inferred | provisional | disputed | unverified`. The `CLAIMS.md` index must list every structured claim; each claim's `evidence` must name an existing `S-NN` source card and its access level must support the claim state.
 
 ## Two joint reviews
 
@@ -72,7 +72,7 @@ python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint venue
 python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint submission --release <id>
 ```
 
-`prose` checks Markdown, text, LaTeX, and DOCX for internal routes, hashes, IDs, scripts, version labels, draft language, ledger fragments, telegraphic sentences, and promotional or combative register. It skips code, tables, formulas, bibliography, headings, and metadata. Scripts detect and verify; they do not rewrite prose. Correct findings or record an author-approved exception tied to the artifact hash.
+`prose` checks Markdown, text, LaTeX, and DOCX for internal routes, filenames, source-card and work-item IDs, access-state labels, hashes, scripts, version labels, draft language, release scaffolding, inaccurate declared word counts, ledger fragments, telegraphic sentences, and promotional or combative register. It skips code, tables, formulas, and headings. Translate relevant search and verification history into complete methodological prose that names scholarly procedures; keep local paths, record IDs, file counts, agent actions, and pending-work instructions in the research layer. Scripts detect and verify; they do not rewrite prose. Correct findings or record an author-approved exception tied to the artifact hash.
 
 The clean-room review receives only the manuscript, venue guide, verified claims, and authorized voice profile. A release must show complete academic sentences, explicit connectors, continuous reasoning, and no unjustified production scaffolding. AI disclosure states functions, verification, and responsibility without narrating prompts, skills, scripts, or Codex internals.
 
@@ -85,6 +85,6 @@ python3 <skill-dir>/scripts/route.py handoff --root <root>
 python3 <skill-dir>/scripts/route.py validate --root <root> --checkpoint handoff
 ```
 
-Structural validation reports structural integrity only. `submission` composes structural, handoff, research, prose, venue, ethics, bibliography, review, and exact-version approval; it blocks every unresolved critical or material debt.
+Structural validation reports structural integrity only. `argument` and later checkpoints require structured claims and resolvable source evidence. `release` and `submission` block unresolved manuscript-targeted claims and manuscript PDF, DOCX, or HTML artifacts without a release manifest. `submission` composes structural, handoff, research, prose, venue, ethics, bibliography, review, and exact-version approval; it blocks every unresolved critical or material debt.
 
 Read only the references needed for the active decision: `researcher-profile.md`, `venue-fingerprint.md`, `research-and-claims.md`, and `writing-and-review.md`.

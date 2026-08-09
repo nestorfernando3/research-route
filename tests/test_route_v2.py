@@ -104,6 +104,190 @@ class RouteV2Tests(unittest.TestCase):
         issues = ROUTE.validate_route(self.root, "prose", "r1")
         self.assertTrue(any(issue.code == "prose-leak" for issue in issues))
 
+    def test_prose_checkpoint_blocks_research_traceability_leaks(self) -> None:
+        self.init()
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text(
+            "# Draft\n\n"
+            "Screened via parent `referencias.bib` (50 sources).\n"
+            "Search layers were logged in `references/source-search-rr002.md`.\n"
+            "Source cards S-01..S-06c record the evidence.\n"
+            "The cards remain at `excerpt/metadata`.\n"
+            "The claim is pending full-text page verification.\n",
+            encoding="utf-8",
+        )
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\n---\n',
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "prose", "r1")
+
+        leak_lines = {
+            issue.path.rsplit(":", 1)[-1]
+            for issue in issues
+            if issue.code == "prose-leak"
+        }
+        self.assertEqual(leak_lines, {"3", "4", "5", "6", "7"})
+
+    def test_prose_checkpoint_accepts_publishable_methods_and_references(self) -> None:
+        text = (
+            "We searched Web of Science, Scopus, JSTOR, and SciELO for "
+            "English- and Spanish-language scholarship published between "
+            "1960 and 2024. We retained the principal positions and strongest "
+            "rival accounts relevant to the argument.\n\n"
+            "Lancy, D. F. (2015). The Anthropology of Childhood: Cherubs, "
+            "Chattel, Changelings. Cambridge University Press.\n"
+        )
+
+        issues = ROUTE._prose_findings(Path("manuscript/draft.md"), text)
+
+        self.assertFalse(any(issue.code == "prose-leak" for issue in issues))
+
+    def test_argument_checkpoint_requires_structured_claims_for_legacy_index_entries(self) -> None:
+        self.init()
+        (self.root / "CLAIMS.md").write_text(
+            "# Claims\n\n## Central claim\n\n"
+            "- C-001 — The central claim.\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "argument")
+
+        self.assertTrue(any(issue.code == "claims-record" for issue in issues))
+
+    def test_submission_blocks_provisional_claim_targeting_manuscript(self) -> None:
+        self.init()
+        claim = self.root / "claims" / "C-001-central.md"
+        claim.write_text(
+            "---\n"
+            'id: "C-001"\n'
+            'state: "provisional"\n'
+            'risk: "material"\n'
+            'scope: "central claim"\n'
+            'evidence: ["S-01"]\n'
+            'challenges: "rival"\n'
+            'confidence: "medium"\n'
+            'manuscript_targets: ["manuscript/draft.md"]\n'
+            'review_status: "reviewed"\n'
+            'reopening_condition: "inspect rival"\n'
+            "---\n\nCentral claim.\n",
+            encoding="utf-8",
+        )
+        (self.root / "CLAIMS.md").write_text(
+            "# Claims\n\n## Central claim\n\n- C-001 — The central claim.\n",
+            encoding="utf-8",
+        )
+        (self.root / "sources" / "S-01-test.md").write_text(
+            "# S-01\n\n- access level: full text\n",
+            encoding="utf-8",
+        )
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text("An academic sentence with evidence.\n", encoding="utf-8")
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\ndocx: "manuscript/draft.md"\n---\n',
+            encoding="utf-8",
+        )
+        (release / "APPROVAL.md").write_text("Approved.\n", encoding="utf-8")
+
+        issues = ROUTE.validate_route(self.root, "submission", "r1")
+
+        self.assertTrue(any(issue.code == "unresolved-manuscript-claim" for issue in issues))
+
+    def test_argument_checkpoint_requires_claim_evidence_to_resolve_to_source_card(self) -> None:
+        self.init()
+        claim = self.root / "claims" / "C-001-central.md"
+        claim.write_text(
+            "---\n"
+            'id: "C-001"\n'
+            'state: "supported"\n'
+            'risk: "material"\n'
+            'scope: "central claim"\n'
+            'evidence: ["S-99"]\n'
+            'challenges: "rival"\n'
+            'confidence: "high"\n'
+            'manuscript_targets: ["manuscript/draft.md"]\n'
+            'review_status: "reviewed"\n'
+            'reopening_condition: "inspect rival"\n'
+            "---\n\nCentral claim.\n",
+            encoding="utf-8",
+        )
+        (self.root / "CLAIMS.md").write_text(
+            "# Claims\n\n## Central claim\n\n- C-001 — The central claim.\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "argument")
+
+        self.assertTrue(any(issue.code == "missing-source-card" for issue in issues))
+
+    def test_argument_checkpoint_rejects_supported_claim_without_full_text_source(self) -> None:
+        self.init()
+        claim = self.root / "claims" / "C-001-central.md"
+        claim.write_text(
+            "---\n"
+            'id: "C-001"\n'
+            'state: "supported"\n'
+            'risk: "material"\n'
+            'scope: "central claim"\n'
+            'evidence: ["S-01"]\n'
+            'challenges: "rival"\n'
+            'confidence: "high"\n'
+            'manuscript_targets: ["manuscript/draft.md"]\n'
+            'review_status: "reviewed"\n'
+            'reopening_condition: "inspect rival"\n'
+            "---\n\nCentral claim.\n",
+            encoding="utf-8",
+        )
+        (self.root / "CLAIMS.md").write_text(
+            "# Claims\n\n## Central claim\n\n- C-001 — The central claim.\n",
+            encoding="utf-8",
+        )
+        (self.root / "sources" / "S-01-test.md").write_text(
+            "# S-01\n\n- access level: excerpt\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "argument")
+
+        self.assertTrue(any(issue.code == "unsupported-source-access" for issue in issues))
+
+    def test_release_checkpoint_blocks_orphan_manuscript_artifacts(self) -> None:
+        self.init()
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text("An academic sentence.\n", encoding="utf-8")
+        (self.root / "manuscript" / "draft.pdf").write_bytes(b"pdf")
+
+        issues = ROUTE.validate_route(self.root, "release")
+
+        self.assertTrue(any(issue.code == "orphan-release-artifact" for issue in issues))
+
+    def test_prose_checkpoint_blocks_release_scaffolding_and_wrong_word_count(self) -> None:
+        self.init()
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text(
+            "*Research Route `paper de research route/` — English — draft*\n"
+            "*Provisional target: Journal of Family Theory & Review*\n"
+            "Word count: ~7,500 (manuscript) + references\n"
+            "An academic sentence.\n",
+            encoding="utf-8",
+        )
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\n---\n',
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "prose", "r1")
+
+        self.assertTrue(any(issue.code == "release-scaffolding" for issue in issues))
+        self.assertTrue(any(issue.code == "word-count" for issue in issues))
+
     def test_review_argument_reports_deferred_work(self) -> None:
         self.init()
         output = self.root / "notes.md"

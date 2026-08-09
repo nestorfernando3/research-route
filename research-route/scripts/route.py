@@ -25,6 +25,7 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "assets" / "route-templ
 FRONTMATTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)")
 ITEM_ID = re.compile(r"rr-[0-9]{3,}")
+SOURCE_ID = re.compile(r"(?<![A-Za-z0-9])S-[0-9]{2}[a-z]?(?![A-Za-z0-9])", re.IGNORECASE)
 ALLOWED_ITEM_TYPES = {
     "question",
     "source",
@@ -1414,6 +1415,18 @@ def _handoff_checkpoint_issues(root_fd: int) -> list[ValidationIssue]:
 PIPELINE_TERMS = (
     r"\b(?:TwExtract|synthetic_coder|ROUTE\.md|HANDOFF\.md|work-items|"
     r"v\d+(?:\.\d+)*[-\w]*|[A-Z]-X\d+|P[0-3]|D-\d{3})\b",
+    r"`[^`\n]*(?:\.md|\.bib|\.csv|\.py)`",
+    r"`(?!(?:https?|mailto):)[^`\n]*[/\\][^`\n]*`",
+    r"\b(?:references|sources|claims|work-items|literatura)/[^\s`),;]+",
+    r"\b(?:S-\d{2}[a-z]?|rr-?\d{3,})\b",
+    r"\bsource cards?\b",
+    r"\b(?:excerpt|metadata)\s*/\s*(?:excerpt|metadata)\b",
+    r"\bpending\s+(?:full[- ]text|page(?:-level)?)\b[^.!?;]{0,80}\bverification\b",
+)
+RELEASE_SCAFFOLDING = re.compile(
+    r"(?i)^\s*(?:\*+Research Route\b|\*?Provisional target\s*:|"
+    r"Word count\s*:|Language\s*:|Genre\s*:|"
+    r"\*\*(?:Verification note|Preprint|Positionality)\b)"
 )
 TELEGRAPHIC_TERMS = re.compile(
     r"\b(?:Hecho|Omisión|Fuente|Circularidad|Caso\s+P\d|Aportación\s+metodológica)\b",
@@ -1463,6 +1476,14 @@ def _prose_findings(path: Path, text: str) -> list[ValidationIssue]:
                     "internal pipeline identifier appears in publication prose",
                 )
             )
+        if RELEASE_SCAFFOLDING.search(line):
+            findings.append(
+                ValidationIssue(
+                    "release-scaffolding",
+                    f"{path.as_posix()}:{line_number}",
+                    "production metadata belongs in the release manifest or title page, not manuscript prose",
+                )
+            )
         if TELEGRAPHIC_TERMS.search(line):
             findings.append(
                 ValidationIssue(
@@ -1486,6 +1507,29 @@ def _prose_findings(path: Path, text: str) -> list[ValidationIssue]:
                 )
             )
     return findings
+
+
+def _word_count_findings(path: Path, text: str) -> list[ValidationIssue]:
+    match = re.search(
+        r"(?im)^\s*(?:\*+)?word count\s*:\s*~?([0-9][0-9,]*)\b",
+        text,
+    )
+    if match is None:
+        return []
+    declared = int(match.group(1).replace(",", ""))
+    if declared <= 0:
+        return []
+    actual = len(re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", text))
+    if abs(actual - declared) / declared <= 0.05:
+        return []
+    line_number = text[: match.start()].count("\n") + 1
+    return [
+        ValidationIssue(
+            "word-count",
+            f"{path.as_posix()}:{line_number}",
+            f"declared word count {declared} differs from artifact count {actual} by more than 5%",
+        )
+    ]
 
 
 def _release_paths(root: Path, release_id: str | None) -> list[Path]:
@@ -1534,8 +1578,153 @@ def _prose_checkpoint_issues(root: Path, release_id: str | None) -> list[Validat
                 ):
                     continue
                 issues.append(issue)
+            for issue in _word_count_findings(Path(_relative_path(root, path)), artifact):
+                if (
+                    issue.code in exceptions_text
+                    and issue.path in exceptions_text
+                    and artifact_hash in exceptions_text
+                ):
+                    continue
+                issues.append(issue)
         except (OSError, UnicodeError, zipfile.BadZipFile, ElementTree.ParseError) as error:
             issues.append(ValidationIssue("artifact-read", _relative_path(root, path), str(error)))
+    return issues
+
+
+def _claim_index_ids(root: Path) -> set[str]:
+    path = root / "CLAIMS.md"
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return set()
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"(?im)^\s*-\s*\[?((?:C|S-C)-[0-9]{2,3})\b",
+            text,
+        )
+    }
+
+
+def _source_card_access(root: Path) -> dict[str, str]:
+    cards: dict[str, str] = {}
+    sources = root / "sources"
+    if not sources.is_dir():
+        return cards
+    for path in sorted(sources.glob("*.md")):
+        match = re.match(r"(S-[0-9]{2}[a-z]?)\b", path.name, re.IGNORECASE)
+        if match is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        access = re.search(
+            r"(?im)^\s*-\s*access level(?:,[^:\n]+)?\s*:\s*([^|\n]+)",
+            text,
+        )
+        cards[match.group(1).upper()] = access.group(1).strip().casefold() if access else ""
+    return cards
+
+
+def _claim_evidence_issues(
+    root: Path,
+    path: Path,
+    metadata: dict[str, object],
+    source_cards: dict[str, str],
+    checkpoint: str | None,
+) -> list[ValidationIssue]:
+    if checkpoint not in {"argument", "release", "submission"}:
+        return []
+    relative_path = _relative_path(root, path)
+    evidence = metadata.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return [
+            ValidationIssue(
+                "claim-evidence",
+                relative_path,
+                "evidence must be a non-empty list of source-card references",
+            )
+        ]
+    issues: list[ValidationIssue] = []
+    for entry in evidence:
+        if not isinstance(entry, str):
+            issues.append(
+                ValidationIssue(
+                    "claim-evidence",
+                    relative_path,
+                    "each evidence entry must be a source-card reference",
+                )
+            )
+            continue
+        ids = {value.upper() for value in SOURCE_ID.findall(entry)}
+        if not ids:
+            issues.append(
+                ValidationIssue(
+                    "claim-evidence",
+                    relative_path,
+                    f"evidence entry has no source-card ID: {entry}",
+                )
+            )
+            continue
+        for source_id in sorted(ids):
+            if source_id not in source_cards:
+                issues.append(
+                    ValidationIssue(
+                        "missing-source-card",
+                        relative_path,
+                        f"evidence references missing source card: {source_id}",
+                    )
+                )
+            elif metadata.get("state") == "supported" and not any(
+                level in source_cards[source_id]
+                for level in ("full text", "dataset", "primary material")
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "unsupported-source-access",
+                        relative_path,
+                        f"supported claim relies on {source_id} without full-text access",
+                    )
+                )
+    return issues
+
+
+def _orphan_release_artifact_issues(
+    root: Path, checkpoint: str | None, release_id: str | None
+) -> list[ValidationIssue]:
+    if checkpoint not in {"release", "submission"}:
+        return []
+    referenced: set[Path] = set()
+    if release_id:
+        manifest = root / "releases" / release_id / "RELEASE.md"
+        if manifest.is_file():
+            try:
+                metadata, _ = parse_frontmatter(manifest)
+            except (OSError, UnicodeError, ValueError):
+                metadata = {}
+            for field in ("source_manuscript", "docx"):
+                value = metadata.get(field)
+                if isinstance(value, str) and value:
+                    referenced.add((root / value).resolve())
+    manuscript = root / "manuscript"
+    if not manuscript.is_dir():
+        return []
+    issues: list[ValidationIssue] = []
+    for path in sorted(manuscript.rglob("*")):
+        if not path.is_file() or path.suffix.casefold() not in {".pdf", ".docx", ".html"}:
+            continue
+        if path.resolve() in referenced:
+            continue
+        issues.append(
+            ValidationIssue(
+                "orphan-release-artifact",
+                _relative_path(root, path),
+                "release artifact is outside a release manifest",
+            )
+        )
     return issues
 
 
@@ -1569,26 +1758,75 @@ def _release_checkpoint_issues(root: Path, release_id: str | None) -> list[Valid
 def _v2_semantic_issues(root: Path, checkpoint: str | None) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     claims_dir = root / "claims"
-    if claims_dir.is_dir():
-        for path in sorted(claims_dir.glob("C-*.md")):
-            try:
-                metadata, body = parse_frontmatter(path)
-            except (OSError, UnicodeError, ValueError) as error:
-                issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), str(error)))
-                continue
-            required = ("id", "state", "risk", "scope", "evidence", "challenges", "confidence", "manuscript_targets", "review_status", "reopening_condition")
-            for field in required:
-                if field not in metadata:
-                    issues.append(ValidationIssue("missing-field", _relative_path(root, path), f"missing claim field: {field}"))
-            if metadata.get("state") not in ALLOWED_CLAIM_STATES:
-                issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim state: {metadata.get('state')!r}"))
-            if metadata.get("risk") not in ALLOWED_RISKS:
-                issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim risk: {metadata.get('risk')!r}"))
-            targets = metadata.get("manuscript_targets")
-            if metadata.get("state") == "unverified" and isinstance(targets, list) and targets:
-                issues.append(ValidationIssue("unverified-manuscript-claim", _relative_path(root, path), "unverified claim cannot target manuscript prose"))
-            if not any(character.isalnum() for character in body):
-                issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), "claim record must contain a substantive body"))
+    claim_paths = sorted(claims_dir.glob("C-*.md")) if claims_dir.is_dir() else []
+    index_ids = _claim_index_ids(root)
+    structured_ids: set[str] = set()
+    source_cards = _source_card_access(root)
+    if checkpoint in {"argument", "release", "submission"}:
+        if not claim_paths:
+            issues.append(
+                ValidationIssue(
+                    "claims-record",
+                    "claims",
+                    "argument and release checkpoints require structured claim records",
+                )
+            )
+        if index_ids and not claim_paths:
+            issues.append(
+                ValidationIssue(
+                    "claims-record",
+                    "CLAIMS.md",
+                    "legacy claims index contains entries without structured claim records",
+                )
+            )
+        if claim_paths and not index_ids:
+            issues.append(
+                ValidationIssue(
+                    "claims-index",
+                    "CLAIMS.md",
+                    "structured claim records must be listed in CLAIMS.md",
+                )
+            )
+    for path in claim_paths:
+        try:
+            metadata, body = parse_frontmatter(path)
+        except (OSError, UnicodeError, ValueError) as error:
+            issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), str(error)))
+            continue
+        claim_id = metadata.get("id")
+        if isinstance(claim_id, str):
+            structured_ids.add(claim_id)
+        required = ("id", "state", "risk", "scope", "evidence", "challenges", "confidence", "manuscript_targets", "review_status", "reopening_condition")
+        for field in required:
+            if field not in metadata:
+                issues.append(ValidationIssue("missing-field", _relative_path(root, path), f"missing claim field: {field}"))
+        if metadata.get("state") not in ALLOWED_CLAIM_STATES:
+            issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim state: {metadata.get('state')!r}"))
+        if metadata.get("risk") not in ALLOWED_RISKS:
+            issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim risk: {metadata.get('risk')!r}"))
+        targets = metadata.get("manuscript_targets")
+        if "manuscript_targets" in metadata and not isinstance(targets, list):
+            issues.append(ValidationIssue("invalid-field", _relative_path(root, path), "manuscript_targets must be a list"))
+        if (
+            checkpoint in {"release", "submission"}
+            and metadata.get("state") in {"provisional", "disputed", "unverified"}
+            and isinstance(targets, list)
+            and targets
+        ):
+            issues.append(ValidationIssue("unresolved-manuscript-claim", _relative_path(root, path), "provisional, disputed, or unverified claim cannot target manuscript prose at release"))
+        issues.extend(_claim_evidence_issues(root, path, metadata, source_cards, checkpoint))
+        if not any(character.isalnum() for character in body):
+            issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), "claim record must contain a substantive body"))
+    if index_ids and structured_ids:
+        for claim_id in sorted(index_ids):
+            if claim_id.startswith("C-") and claim_id not in structured_ids:
+                issues.append(
+                    ValidationIssue(
+                        "missing-claim-record",
+                        "CLAIMS.md",
+                        f"claims index entry has no structured record: {claim_id}",
+                    )
+                )
     if checkpoint in {"argument", "release", "submission"}:
         for path in sorted((root / "work-items").glob("rr-*.md")):
             try:
@@ -2109,6 +2347,7 @@ def _validate_route_contents_at(
     if checkpoint in {"venue", "submission"}:
         issues.extend(_venue_checkpoint_issues(root, checkpoint == "submission"))
     if checkpoint in {"release", "submission"}:
+        issues.extend(_orphan_release_artifact_issues(root, checkpoint, release_id))
         issues.extend(_release_checkpoint_issues(root, release_id))
     _validate_markdown_links(root_fd, issues, work_items_fd)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
