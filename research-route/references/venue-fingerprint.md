@@ -23,7 +23,7 @@ Balance the sample across these strata:
 
 Use editorials, calls, and special issues as additional evidence, never substitutes for representative full articles.
 
-A venue fingerprint is incomplete until at least ten representative articles have been read at full-text level. If access prevents this, record the block and ask the researcher to obtain access or approve another venue; never lower the threshold silently.
+Use three representative full texts and current official requirements for a provisional orientation. A venue fingerprint is complete for submission only after at least ten representative articles have been read at full-text level. If access prevents the relevant threshold, record the block and ask the researcher to obtain access or approve another venue; never lower the threshold silently.
 
 Ten is a floor, not an automatic completion signal. Continue until the sample covers the planned strata and new articles have low probability of changing a material venue conclusion. Record remaining unknowns.
 

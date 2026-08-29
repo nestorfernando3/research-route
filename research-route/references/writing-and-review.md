@@ -46,17 +46,19 @@ Draft sections as linked argument units before polishing:
 
 Turn the unit into prose only when claim, evidence, and inference can be distinguished. In humanities writing, let passages, archives, concepts, counterreadings, and argumentative movement do visible work. In social-science writing, align question, design, measures/materials, analysis, findings, uncertainty, and scope. Use the structure the inquiry and target article type require; do not force IMRaD onto interpretive work or hide empirical design decisions in elegant prose.
 
-## Revise in seven passes
+## Revise in two joint reviews
 
-Run separate passes and record high-consequence changes:
+Match review depth to consequence. Record routine exploration briefly and batch material debt. Never defer ethics, privacy, source access, quotations, decisive claims, methods, results, rights, authorship, or submission approval.
 
-1. **Argument advancement:** every section changes what the reader can understand or accept; remove summary that does no argumentative work.
-2. **Evidence and claim calibration:** verify support, access, quotations, locators, citations, causal/interpretive strength, and uncertainty.
-3. **Researcher positioning and reflexivity:** include only relevant, approved positioning; distinguish standpoint from evidence.
-4. **Voice and prose movement:** restore authorized cadence, precise verbs, paragraph logic, purposeful transitions, and language-specific strengths.
-5. **Editorial fit without imitation:** meet explicit requirements and make the contribution legible while preserving method, ethics, and voice.
-6. **Verbal and structural independence:** detect patchwriting, overly close paraphrase, source-shaped sequence, and unmarked translation; rewrite from understood claims and cite.
-7. **Ethical and epistemic honesty:** inspect privacy, consent, approvals, rights, conflicts, authorship/contributor responsibilities, analytic transparency, limitations, AI use, and all overclaims.
+### Argument review
+
+Resolve argument advancement, evidence and claim calibration, researcher positioning, rival interpretations, simpler explanations, method, and thesis consequences in one coordinated pass. Every finding names its claim, location, decision, and next action. Stabilize the thesis only after critical findings are closed and material findings have a declared treatment.
+
+### Release review
+
+Resolve voice and prose movement, editorial fit, verbal independence, terminology, ethics, permissions, authorship, references, AI disclosure, venue requirements, and exact-version integrity together. Use editor, sympathetic-reviewer, and skeptical-reviewer perspectives inside the same record. Run an independent adversarial pass only when a critical threat appears.
+
+The release review must confirm that the manuscript contains complete academic sentences, explicit connectors, continuous paragraph logic, and no internal pipeline labels. When the article needs a literature-search or verification account, rewrite the relevant procedure as scholarly method: identify the sources searched, selection criteria, date range, access limits that constrain claims, and stopping rationale. Keep local filenames and paths, source-card or work-item identifiers, file counts, access-state labels, agent actions, and pending-work instructions in the research state. A script may detect patterns; it must not rewrite the manuscript.
 
 After a pass that changes thesis, contribution, method, corpus, venue, proposed profile-permission relabeling or approved reflexive positioning, or submission version, return to the appropriate researcher checkpoint. Never draft from material while it remains labeled `private`.
 
@@ -90,4 +92,4 @@ Prepare and cross-check:
 - current submission checklist, anonymization, file, length, and metadata requirements;
 - final researcher approval of the exact version proposed for submission.
 
-Finish only after the three review simulations, ethics/current-policy recheck, reference and artifact cross-check, route validation, and submission-version checkpoint are complete or explicitly recorded as blocked.
+Finish only after the argument and release reviews, ethics/current-policy recheck, reference and artifact cross-check, route validation, and submission-version checkpoint are complete or explicitly recorded as blocked.

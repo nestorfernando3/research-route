@@ -32,7 +32,7 @@ Log database or collection, exact query, filters, date, counts where useful, scr
 
 Record the highest access actually inspected: `metadata | abstract | excerpt | full text | dataset | primary material`. Never let a search snippet, abstract, secondary citation, or plausible title masquerade as full-text evidence.
 
-Create one card in `sources/` per consulted source. Inspect existing cards, allocate the next unused stable key in the form `S-NN`, and name the file `S-NN-short-title.md`; use the real allocated key in every link and never write a literal placeholder such as `sources/<source-key>.md`. If no project root exists yet, describe the proposed source card without supplying any filename; allocate its real key only after initialization.
+Create a complete card in `sources/` for every cited, decisive, or adverse source. Candidate sources need only a verified identity, access level, selection reason, and discard or promotion decision. Inspect existing cards, allocate the next unused stable key in the form `S-NN`, and name the file `S-NN-short-title.md`; use the real allocated key in every link and never write a literal placeholder such as `sources/<source-key>.md`. If no project root exists yet, describe the proposed source card without supplying any filename; allocate its real key only after initialization.
 
 ```markdown
 # <source key and title>
@@ -61,13 +61,13 @@ Keep observation, source interpretation, and your inference distinct. Verify bib
 
 ## Maintain five claim states
 
-In `CLAIMS.md`, give each substantive claim an identifier, text, scope, state, linked evidence, inference, strongest objection, confidence/reason, manuscript destination, and reopening condition. Use one state: `supported | inferred | provisional | disputed | unverified`.
+In `CLAIMS.md`, give each substantive claim an identifier, text, scope, state, linked evidence, inference, strongest objection, confidence/reason, manuscript destination, and reopening condition. In schema v2, store the full record in `claims/C-NNN-<slug>.md` and list its identifier in `CLAIMS.md`; the validator reconciles both layers. Use one state: `supported | inferred | provisional | disputed | unverified`.
 
-- `supported`: located, verifiable evidence supports the stated scope;
+- `supported`: located, verifiable full-text, dataset, or primary evidence supports the stated scope;
 - `inferred`: evidence exists and the interpretive or analytical step is explicit;
 - `provisional`: useful for exploration but not ready as a conclusion;
 - `disputed`: a material rival source, result, or interpretation is live;
-- `unverified`: verification is absent; do not state it as manuscript fact.
+- `unverified`: verification is absent; do not state it as manuscript fact. At release, `provisional`, `disputed`, and `unverified` claims with manuscript destinations remain blocked until their state and evidence are resolved.
 
 Contrary evidence must update the affected claim, synthesis, thesis consequence, and next decision. Do not quarantine it in limitations. Calibrate verbs and uncertainty to evidence; association does not become causation, and an interpretation does not become the only possible reading.
 

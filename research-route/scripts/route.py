@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import fcntl
+import hashlib
 import json
 import os
 import posixpath
@@ -14,6 +15,8 @@ import stat
 import sys
 import tempfile
 import unicodedata
+import zipfile
+from xml.etree import ElementTree
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -22,6 +25,7 @@ TEMPLATE_ROOT = Path(__file__).resolve().parent.parent / "assets" / "route-templ
 FRONTMATTER_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)")
 ITEM_ID = re.compile(r"rr-[0-9]{3,}")
+SOURCE_ID = re.compile(r"(?<![A-Za-z0-9])S-[0-9]{2}[a-z]?(?![A-Za-z0-9])", re.IGNORECASE)
 ALLOWED_ITEM_TYPES = {
     "question",
     "source",
@@ -30,11 +34,28 @@ ALLOWED_ITEM_TYPES = {
     "writing",
     "audit",
     "human-checkpoint",
+    "venue",
+    "ethics",
+    "review",
+    "submission",
 }
 ALLOWED_MODES = {"light", "deep"}
-ALLOWED_STATUSES = {"open", "closed"}
+ALLOWED_STATUSES = {"open", "closed", "provisional", "verified", "cancelled"}
 ALLOWED_CYCLES = {"discover", "argue", "compose", "audit"}
-PROJECT_SCHEMA_VERSION = 1
+ALLOWED_SCHEMA_VERSIONS = {1, 2}
+PROJECT_SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
+ALLOWED_RISKS = {"routine", "material", "critical"}
+ALLOWED_REVIEW_STATUSES = {"none", "deferred", "reviewed"}
+RISK_ORDER = {"routine": 0, "material": 1, "critical": 2}
+ALLOWED_CLAIM_STATES = {
+    "supported",
+    "inferred",
+    "provisional",
+    "disputed",
+    "unverified",
+}
+ALLOWED_SOURCE_USE = {"candidate", "used", "decisive", "adverse"}
 REQUIRED_FILES = (
     "ROUTE.md",
     "INQUIRY.md",
@@ -74,6 +95,13 @@ ITEM_FIELDS = {
     "mode",
     "output",
 }
+V2_ITEM_FIELDS = ITEM_FIELDS | {
+    "risk",
+    "review_status",
+    "acceptance",
+    "verification",
+    "result",
+}
 MARKDOWN_LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 REFERENCE_LINK = re.compile(r"!?\[([^\]]+)\]\[([^\]]*)\]")
 SHORTCUT_REFERENCE = re.compile(r"(?<!!)\[([^\]\n]+)\](?![\[(]|:)")
@@ -96,16 +124,35 @@ class ValidationIssue:
     message: str
 
 
-@dataclass(frozen=True)
-class MigrationPlan:
-    current_version: int
-    target_version: int
-    changes: tuple[str, ...]
-    applicable: bool
+def _risk_for_item(item_type: str, mode: str = "light") -> str:
+    """Assign a conservative default risk while allowing cheap exploration."""
+    if item_type in {"ethics", "submission", "human-checkpoint"}:
+        return "critical"
+    if item_type in {"source", "venue", "review"}:
+        return "material" if mode == "light" else "critical"
+    if item_type in {"decision", "synthesis"}:
+        return "material" if mode == "light" else "critical"
+    return "routine"
 
 
-Migration = Callable[[int, bool], tuple[str, ...]]
-MIGRATIONS: dict[tuple[int, int], Migration] = {}
+def _requested_risk(item_type: str, mode: str, requested: str | None) -> str:
+    default = _risk_for_item(item_type, mode)
+    if requested is None:
+        return default
+    if requested not in ALLOWED_RISKS:
+        raise ValueError(f"unsupported risk: {requested}")
+    if RISK_ORDER[requested] < RISK_ORDER[default]:
+        raise ValueError(f"cannot lower automatic risk {default} to {requested}")
+    return requested
+
+
+def _schema_version(metadata: dict[str, object]) -> int:
+    value = metadata.get("schema_version")
+    return value if type(value) is int else LEGACY_SCHEMA_VERSION
+
+
+def _is_v2_root(metadata: dict[str, object]) -> bool:
+    return _schema_version(metadata) >= PROJECT_SCHEMA_VERSION
 
 
 def _atomic_write_bytes_at(
@@ -530,6 +577,7 @@ def new_work_item(
     item_type: str,
     mode: str,
     dependencies: list[str],
+    risk: str | None = None,
 ) -> Path:
     if item_type not in ALLOWED_ITEM_TYPES:
         raise ValueError(f"unsupported work-item type: {item_type}")
@@ -544,7 +592,8 @@ def new_work_item(
         assert state_fd is not None
         with _claim_guard(state_fd):
             _require_file_at(root_fd, root, "ROUTE.md")
-            _parse_frontmatter_at(root_fd, "ROUTE.md")
+            route_metadata, _ = _parse_frontmatter_at(root_fd, "ROUTE.md")
+            project_v2 = _is_v2_root(route_metadata)
             with _directory_at(root_fd, "work-items") as work_items_fd:
                 assert work_items_fd is not None
                 item_id = _reserve_item_id(root_fd, work_items_fd, state_fd)
@@ -552,7 +601,7 @@ def new_work_item(
                 item_metadata: dict[str, object] = {
                     "id": item_id,
                     "title": title,
-                    "schema_version": 1,
+                    "schema_version": 2 if project_v2 else 1,
                     "type": item_type,
                     "status": "open",
                     "depends_on": dependencies,
@@ -560,6 +609,16 @@ def new_work_item(
                     "mode": mode,
                     "output": None,
                 }
+                if project_v2:
+                    item_metadata.update(
+                        {
+                            "risk": _requested_risk(item_type, mode, risk),
+                            "review_status": "none",
+                            "acceptance": ["Record a defensible result and link its canonical output."],
+                            "verification": [],
+                            "result": None,
+                        }
+                    )
                 body = (
                     f"\n# {title}\n\n"
                     f"## Question or deliverable\n\n{title}\n\n"
@@ -598,7 +657,7 @@ def claim_item(root: Path, item_id: str, owner: str) -> Path:
                         raise ValueError(
                             f"invalid work item {item_path}: {record_errors[0][1]}"
                         )
-                    if item.get("status") != "open":
+                    if item.get("status") not in {"open", "provisional"}:
                         raise ValueError(f"work item is not open: {item_id}")
                     dependencies = item.get("depends_on")
                     assert isinstance(dependencies, list)
@@ -616,7 +675,7 @@ def claim_item(root: Path, item_id: str, owner: str) -> Path:
                                 f"invalid work item {dependency_path}: "
                                 f"{dependency_errors[0][1]}"
                             )
-                        if dependency_item.get("status") != "closed":
+                        if dependency_item.get("status") not in {"closed", "verified"}:
                             unclosed.append(dependency)
                 if unclosed:
                     raise ValueError(
@@ -670,6 +729,125 @@ def release_item(
                     )
                     raise ValueError(f"claim belongs to {claimed_by}, not {owner}")
                 os.unlink(f"{item_id}.lock", dir_fd=claims_fd)
+
+
+def _normalize_output_path(output: str) -> str:
+    if not isinstance(output, str) or not output.strip() or "\x00" in output:
+        raise ValueError("output must be a non-empty project-relative path")
+    candidate = output.strip().replace("\\", "/")
+    if candidate.startswith("/") or re.match(r"^[A-Za-z]:", candidate):
+        raise ValueError("output must be a non-empty project-relative path")
+    if ".." in candidate.split("/"):
+        raise ValueError("output must be a normalized project-relative path")
+    normalized = posixpath.normpath(candidate)
+    if normalized in {"", "."} or normalized.startswith("../"):
+        raise ValueError("output must be a normalized project-relative path")
+    return normalized
+
+
+def _output_is_regular_file(root_fd: int, output: str) -> bool:
+    try:
+        with _relative_parent_fd(root_fd, output) as (parent_fd, name):
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            try:
+                return stat.S_ISREG(os.fstat(descriptor).st_mode)
+            finally:
+                os.close(descriptor)
+    except (OSError, ValueError):
+        return False
+
+
+def complete_item(
+    root: Path,
+    item_id: str,
+    owner: str,
+    output: str,
+    verification: list[str] | None = None,
+    result: str | None = None,
+    provisional: bool = False,
+) -> Path:
+    _validate_item_id(item_id)
+    if not owner:
+        raise ValueError("owner must not be empty")
+    normalized_output = _normalize_output_path(output)
+    with _state_directory_fd(root) as (root_fd, state_fd):
+        assert state_fd is not None
+        with _claim_guard(state_fd):
+            _require_file_at(root_fd, root, "ROUTE.md")
+            _parse_frontmatter_at(root_fd, "ROUTE.md")
+            with _directory_at(root_fd, "work-items") as work_items_fd:
+                assert work_items_fd is not None
+                item_name = _item_name_at(work_items_fd, item_id)
+                item_path = root / "work-items" / item_name
+                item, body = _parse_frontmatter_at(
+                    work_items_fd, item_name, item_path
+                )
+                record_errors = _work_item_record_errors(item)
+                if record_errors:
+                    raise ValueError(
+                        f"invalid work item {item_path}: {record_errors[0][1]}"
+                    )
+                if not _output_is_regular_file(root_fd, normalized_output):
+                    raise ValueError(
+                        "output must resolve to an existing regular file inside the project root"
+                    )
+                with _directory_at(state_fd, "claims") as claims_fd:
+                    claim_name = f"{item_id}.lock"
+                    if not _exists_at(claims_fd, claim_name):
+                        raise ValueError(f"work item is not claimed: {item_id}")
+                    try:
+                        claim = json.loads(
+                            _read_regular_text_at(claims_fd, claim_name)
+                        )
+                    except (ValueError, json.JSONDecodeError) as error:
+                        raise ValueError(f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {error}") from None
+                    claim_errors = _claim_record_errors(claim)
+                    if claim_errors:
+                        raise ValueError(
+                            f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {claim_errors[0]}"
+                        )
+                    assert isinstance(claim, dict)
+                    identity_errors = _claim_identity_errors(claim, item_id)
+                    if identity_errors:
+                        raise ValueError(
+                            f"invalid claim {root / '.research-route' / 'claims' / claim_name}: {identity_errors[0][1]}"
+                        )
+                    if claim.get("owner") != owner:
+                        raise ValueError(
+                            f"claim belongs to {claim.get('owner')}, not {owner}"
+                        )
+                    if item.get("status") == "closed":
+                        if item.get("owner") != owner or item.get("output") != normalized_output:
+                            raise ValueError(
+                                "closed work item does not match the completing owner and output"
+                            )
+                        os.unlink(claim_name, dir_fd=claims_fd)
+                        return item_path
+                    if item.get("status") not in {"open", "provisional"}:
+                        raise ValueError(f"unsupported work-item status: {item.get('status')}")
+                    if item.get("schema_version") == 2 and not provisional:
+                        if not verification or not result or not result.strip():
+                            raise ValueError("v2 completion requires verification and result, or --provisional")
+                        item["verification"] = verification
+                        item["result"] = result
+                        item["review_status"] = "reviewed"
+                    if item.get("schema_version") == 2 and provisional:
+                        if item.get("risk") == "critical":
+                            raise ValueError("critical work cannot be deferred")
+                        item["review_status"] = "deferred"
+                    item["status"] = "provisional" if provisional else "closed"
+                    item["owner"] = owner
+                    item["output"] = normalized_output
+                    _write_frontmatter_at(work_items_fd, item_name, item, body)
+                    os.unlink(claim_name, dir_fd=claims_fd)
+                    return item_path
 
 
 def _relative_path(root: Path, path: Path) -> str:
@@ -760,9 +938,11 @@ def _claim_reference_errors(
 def _work_item_record_errors(
     metadata: dict[str, object],
 ) -> tuple[tuple[str, str], ...]:
+    schema_version = metadata.get("schema_version")
+    required_fields = V2_ITEM_FIELDS if schema_version == 2 else ITEM_FIELDS
     errors: list[tuple[str, str]] = [
         ("missing-field", f"missing required field: {field}")
-        for field in sorted(ITEM_FIELDS - metadata.keys())
+        for field in sorted(required_fields - metadata.keys())
     ]
     item_id = metadata.get("id")
     if not isinstance(item_id, str) or not ITEM_ID.fullmatch(item_id):
@@ -776,8 +956,7 @@ def _work_item_record_errors(
         value = metadata.get(field)
         if value is not None and not isinstance(value, str):
             errors.append(("invalid-field", f"{field} must be a string or null"))
-    schema_version = metadata.get("schema_version")
-    if schema_version != PROJECT_SCHEMA_VERSION:
+    if schema_version not in ALLOWED_SCHEMA_VERSIONS:
         errors.append(
             ("unsupported-schema", f"unsupported schema_version: {schema_version!r}")
         )
@@ -799,6 +978,22 @@ def _work_item_record_errors(
         errors.append(
             ("invalid-field", "depends_on must be a list of work-item IDs")
         )
+    if schema_version == 2:
+        risk = metadata.get("risk")
+        if not isinstance(risk, str) or risk not in ALLOWED_RISKS:
+            errors.append(("invalid-enum", f"unsupported risk: {risk!r}"))
+        review_status = metadata.get("review_status")
+        if not isinstance(review_status, str) or review_status not in ALLOWED_REVIEW_STATUSES:
+            errors.append(
+                ("invalid-enum", f"unsupported review_status: {review_status!r}")
+            )
+        for field in ("acceptance", "verification"):
+            value = metadata.get(field)
+            if not isinstance(value, list) or not all(isinstance(entry, str) for entry in value):
+                errors.append(("invalid-field", f"{field} must be a list of strings"))
+        result = metadata.get("result")
+        if result is not None and not isinstance(result, str):
+            errors.append(("invalid-field", "result must be a string or null"))
     return tuple(errors)
 
 
@@ -957,7 +1152,14 @@ def _validate_markdown_links(
             (*markdown_files, *_markdown_files_at(work_items_fd, "work-items"))
         )
     for relative_path, text in markdown_files:
-        for match in MARKDOWN_LINK.finditer(text):
+        link_text = text
+        if relative_path == "RESEARCHER.md":
+            link_text = re.sub(
+                r"(?ms)(^## Private[ \t]*\r?\n).*?(?=^## |\Z)",
+                r"\1",
+                text,
+            )
+        for match in MARKDOWN_LINK.finditer(link_text):
             destination = match.group(1).strip()
             if destination.startswith("<") and ">" in destination:
                 destination = destination[1 : destination.index(">")]
@@ -974,16 +1176,16 @@ def _validate_markdown_links(
                     )
                 )
         definitions: dict[str, str] = {}
-        for match in REFERENCE_DEFINITION.finditer(text):
+        for match in REFERENCE_DEFINITION.finditer(link_text):
             label = _reference_label(match.group(1))
             definitions.setdefault(label, match.group(2) or match.group(3))
         references = {
             _reference_label(match.group(2) or match.group(1))
-            for match in REFERENCE_LINK.finditer(text)
+            for match in REFERENCE_LINK.finditer(link_text)
         }
         references.update(
             label
-            for match in SHORTCUT_REFERENCE.finditer(text)
+            for match in SHORTCUT_REFERENCE.finditer(link_text)
             if (label := _reference_label(match.group(1))) in definitions
         )
         for label in sorted(references):
@@ -1018,6 +1220,8 @@ def _parse_handoff_snapshot(mechanical: bytes) -> datetime:
     ):
         if len(re.findall(rf"(?m)^### {re.escape(heading)}[ \t]*$", text)) != 1:
             raise ValueError(f"duplicate or missing mechanical heading: {heading}")
+    if len(re.findall(r"(?m)^### Deferred review[ \t]*$", text)) > 1:
+        raise ValueError("duplicate mechanical heading: Deferred review")
     match = re.fullmatch(
         r"\n\n"
         r"- Project: (?P<project>[^\r\n]+)\n"
@@ -1029,6 +1233,7 @@ def _parse_handoff_snapshot(mechanical: bytes) -> datetime:
         r"- ROUTE\.md modified: (?P<modified>[^\r\n]+)\n\n"
         r"### Open frontier candidates\n\n(?P<frontier>.+?)\n\n"
         r"### Active claims\n\n(?P<claims>.+?)\n\n"
+        r"(?:### Deferred review\n\n(?P<deferred>.+?)\n\n)?"
         r"### Blocks\n\n(?P<blocks>.+?)\n\n"
         r"### Exact next action\n\n(?P<action>.+?)\n\n",
         text,
@@ -1045,6 +1250,12 @@ def _parse_handoff_snapshot(mechanical: bytes) -> datetime:
             for line in value.splitlines()
         ):
             raise ValueError(f"invalid {section} entries in mechanical snapshot")
+    deferred = match.group("deferred")
+    if deferred and deferred != "- None" and any(
+        re.fullmatch(r"- rr-[0-9]{3,}: .+ \(risk: .+\)", line) is None
+        for line in deferred.splitlines()
+    ):
+        raise ValueError("invalid deferred review entries in mechanical snapshot")
     now = datetime.now(timezone.utc)
     generated = _parse_aware_timestamp(match.group("generated"))
     modified = _parse_aware_timestamp(match.group("modified"))
@@ -1093,7 +1304,825 @@ def _handoff_freshness_issue(root_fd: int) -> ValidationIssue | None:
     )
 
 
-def validate_route(root: Path) -> list[ValidationIssue]:
+def _section_content(body: str, heading: str) -> tuple[str | None, bool]:
+    matches = re.findall(
+        rf"(?ms)^## {re.escape(heading)}[ \t]*\r?\n(.*?)(?=^## |\Z)",
+        body,
+    )
+    return (matches[0].strip(), len(matches) == 1) if len(matches) == 1 else (None, bool(matches))
+
+
+def _has_declared_text(content: str | None) -> bool:
+    if content is None:
+        return False
+    content = re.sub(r"<!--.*?-->", "", content, flags=re.DOTALL).strip()
+    return any(character.isalnum() for character in content)
+
+
+def _privacy_issue(root_fd: int) -> ValidationIssue | None:
+    if not stat.S_ISREG(_relative_kind_at(root_fd, "RESEARCHER.md") or 0):
+        return None
+    try:
+        body = _read_regular_text_at(root_fd, "RESEARCHER.md")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    private, present = _section_content(body, "Private")
+    private_text = re.sub(r"<!--.*?-->", "", private or "", flags=re.DOTALL).strip()
+    if present and _has_declared_text(private) and private_text.casefold() not in {"none", "- none"}:
+        return ValidationIssue(
+            "privacy-boundary",
+            "RESEARCHER.md",
+            "legacy Private content must be relocated or deleted outside the portable project root",
+        )
+    return None
+
+
+def _handoff_checkpoint_issues(root_fd: int) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    try:
+        _, route_body = _parse_frontmatter_at(root_fd, "ROUTE.md")
+    except (OSError, UnicodeError, ValueError):
+        route_body = ""
+    destination, destination_heading = _section_content(route_body, "Destination")
+    if not destination_heading or not _has_declared_text(destination) or destination.casefold() in {"none", "- none"}:
+        issues.append(
+            ValidationIssue(
+                "handoff-checkpoint",
+                "ROUTE.md",
+                "Destination must contain a non-empty objective",
+            )
+        )
+    next_action, next_action_heading = _section_content(route_body, "Exact next action")
+    if (
+        not next_action_heading
+        or not _has_declared_text(next_action)
+        or next_action.casefold() in {"none", "- none"}
+    ):
+        issues.append(
+            ValidationIssue(
+                "handoff-checkpoint",
+                "ROUTE.md",
+                "Exact next action must be non-empty and canonical",
+            )
+        )
+    try:
+        handoff = _read_regular_text_at(root_fd, "HANDOFF.md")
+    except (OSError, UnicodeError, ValueError):
+        handoff = ""
+    intellectual_sections = (
+        "Intellectual change",
+        "Invalidated assumptions",
+        "Live contradiction",
+        "Researcher decisions needed",
+        "Exact next action and why",
+    )
+    for heading in intellectual_sections:
+        content, present = _section_content(handoff, heading)
+        if not present or not _has_declared_text(content):
+            issues.append(
+                ValidationIssue(
+                    "handoff-checkpoint",
+                    "HANDOFF.md",
+                    f"{heading} must declare content or say - None",
+                )
+            )
+        elif heading == "Exact next action and why" and content.casefold() in {"none", "- none"}:
+            issues.append(
+                ValidationIssue(
+                    "handoff-checkpoint",
+                    "HANDOFF.md",
+                    "Exact next action and why must contain a next action",
+                )
+            )
+    route_action = (next_action or "").strip()
+    handoff_action, _ = _section_content(handoff, "Exact next action and why")
+    if (
+        route_action
+        and route_action.casefold() not in {"none", "- none"}
+        and handoff_action
+        and route_action.casefold() not in handoff_action.casefold()
+    ):
+        issues.append(
+            ValidationIssue(
+                "handoff-checkpoint",
+                "HANDOFF.md",
+                "handoff exact next action must include the canonical ROUTE.md action",
+            )
+        )
+    return issues
+
+
+PIPELINE_TERMS = (
+    r"\b(?:TwExtract|synthetic_coder|ROUTE\.md|HANDOFF\.md|work-items|"
+    r"v\d+(?:\.\d+)*[-\w]*|[A-Z]-X\d+|P[0-3]|D-\d{3})\b",
+    r"`[^`\n]*(?:\.md|\.bib|\.csv|\.py)`",
+    r"`(?!(?:https?|mailto):)[^`\n]*[/\\][^`\n]*`",
+    r"\b(?:references|sources|claims|work-items|literatura)/[^\s`),;]+",
+    r"\b(?:S-\d{2}[a-z]?|rr-?\d{3,})\b",
+    r"\bsource cards?\b",
+    r"\b(?:excerpt|metadata)\s*/\s*(?:excerpt|metadata)\b",
+    r"\bpending\s+(?:full[- ]text|page(?:-level)?)\b[^.!?;]{0,80}\bverification\b",
+)
+RELEASE_SCAFFOLDING = re.compile(
+    r"(?i)^\s*(?:\*+Research Route\b|\*?Provisional target\s*:|"
+    r"Word count\s*:|Language\s*:|Genre\s*:|"
+    r"\*\*(?:Verification note|Preprint|Positionality)\b)"
+)
+TELEGRAPHIC_TERMS = re.compile(
+    r"\b(?:Hecho|Omisión|Fuente|Circularidad|Caso\s+P\d|Aportación\s+metodológica)\b",
+    re.IGNORECASE,
+)
+COMBAT_TERMS = re.compile(
+    r"\b(?:primer golpe|desmontar|rompe el hechizo|por eso vende)\b",
+    re.IGNORECASE,
+)
+
+
+def _docx_text(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        data = archive.read("word/document.xml")
+    root = ElementTree.fromstring(data)
+    words = [
+        node.text or ""
+        for node in root.iter()
+        if node.tag.rsplit("}", 1)[-1] == "t"
+    ]
+    return " ".join(words)
+
+
+def _artifact_text(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".docx":
+        return _docx_text(path)
+    return path.read_text(encoding="utf-8")
+
+
+def _prose_findings(path: Path, text: str) -> list[ValidationIssue]:
+    findings: list[ValidationIssue] = []
+    in_code = False
+    for line_number, line in enumerate(text.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code or not stripped or stripped.startswith("#") or stripped.startswith("|"):
+            continue
+        if re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", line):
+            continue
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in PIPELINE_TERMS):
+            findings.append(
+                ValidationIssue(
+                    "prose-leak", f"{path.as_posix()}:{line_number}",
+                    "internal pipeline identifier appears in publication prose",
+                )
+            )
+        if RELEASE_SCAFFOLDING.search(line):
+            findings.append(
+                ValidationIssue(
+                    "release-scaffolding",
+                    f"{path.as_posix()}:{line_number}",
+                    "production metadata belongs in the release manifest or title page, not manuscript prose",
+                )
+            )
+        if TELEGRAPHIC_TERMS.search(line):
+            findings.append(
+                ValidationIssue(
+                    "prose-telegraphic", f"{path.as_posix()}:{line_number}",
+                    "ledger-like nominal fragment requires an academic sentence",
+                )
+            )
+        if COMBAT_TERMS.search(line):
+            findings.append(
+                ValidationIssue(
+                    "prose-register", f"{path.as_posix()}:{line_number}",
+                    "promotional or combative register requires editorial review",
+                )
+            )
+        words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", line)
+        if len(words) <= 4 and line.endswith(".") and not re.match(r"^(?:[A-Z][^.!?]+:)$", line):
+            findings.append(
+                ValidationIssue(
+                    "prose-fragment", f"{path.as_posix()}:{line_number}",
+                    "very short sentence may be a telegraphic fragment",
+                )
+            )
+    return findings
+
+
+def _word_count_findings(path: Path, text: str) -> list[ValidationIssue]:
+    match = re.search(
+        r"(?im)^\s*(?:\*+)?word count\s*:\s*~?([0-9][0-9,]*)\b",
+        text,
+    )
+    if match is None:
+        return []
+    declared = int(match.group(1).replace(",", ""))
+    if declared <= 0:
+        return []
+    actual = len(re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+", text))
+    if abs(actual - declared) / declared <= 0.05:
+        return []
+    line_number = text[: match.start()].count("\n") + 1
+    return [
+        ValidationIssue(
+            "word-count",
+            f"{path.as_posix()}:{line_number}",
+            f"declared word count {declared} differs from artifact count {actual} by more than 5%",
+        )
+    ]
+
+
+def _release_artifact_path(
+    root: Path, value: object
+) -> tuple[Path | None, str | None]:
+    if not isinstance(value, str) or not value:
+        return None, "release-manifest"
+    try:
+        normalized = _normalize_output_path(value)
+    except ValueError:
+        return None, "invalid-path"
+    try:
+        root_fd = os.open(root, DIRECTORY_FLAGS)
+    except OSError:
+        return None, "missing-path"
+    try:
+        if not _output_is_regular_file(root_fd, normalized):
+            return None, "missing-path"
+    finally:
+        os.close(root_fd)
+    return root / normalized, None
+
+
+def _release_paths(root: Path, release_id: str | None) -> list[Path]:
+    if release_id:
+        manifest = root / "releases" / release_id / "RELEASE.md"
+        if not manifest.is_file():
+            return []
+        try:
+            metadata, _ = parse_frontmatter(manifest)
+        except (OSError, UnicodeError, ValueError):
+            return []
+        paths: list[Path] = []
+        for field in ("source_manuscript", "docx"):
+            value = metadata.get(field)
+            path, _ = _release_artifact_path(root, value)
+            if path is not None:
+                paths.append(path)
+        return paths
+    return sorted(
+        path for path in (root / "manuscript").rglob("*")
+        if path.is_file() and path.suffix.lower() in {".md", ".txt", ".tex", ".docx"}
+    )
+
+
+def _prose_checkpoint_issues(root: Path, release_id: str | None) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    paths = _release_paths(root, release_id)
+    if release_id and not paths:
+        return [ValidationIssue("release-manifest", f"releases/{release_id}/RELEASE.md", "release manifest or source manuscript is missing")]
+    exceptions_text = ""
+    if release_id:
+        exceptions = root / "releases" / release_id / "EXCEPTIONS.md"
+        if exceptions.is_file():
+            exceptions_text = exceptions.read_text(encoding="utf-8")
+    for path in paths:
+        if not path.is_file():
+            issues.append(ValidationIssue("missing-path", _relative_path(root, path), "release artifact is missing"))
+            continue
+        try:
+            artifact = _artifact_text(path)
+            artifact_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            for issue in _prose_findings(Path(_relative_path(root, path)), artifact):
+                if (
+                    issue.code in exceptions_text
+                    and issue.path in exceptions_text
+                    and artifact_hash in exceptions_text
+                ):
+                    continue
+                issues.append(issue)
+            for issue in _word_count_findings(Path(_relative_path(root, path)), artifact):
+                if (
+                    issue.code in exceptions_text
+                    and issue.path in exceptions_text
+                    and artifact_hash in exceptions_text
+                ):
+                    continue
+                issues.append(issue)
+        except (OSError, UnicodeError, zipfile.BadZipFile, ElementTree.ParseError) as error:
+            issues.append(ValidationIssue("artifact-read", _relative_path(root, path), str(error)))
+    return issues
+
+
+def _claim_index_ids(root: Path) -> set[str]:
+    path = root / "CLAIMS.md"
+    if not path.is_file():
+        return set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return set()
+    return {
+        match.group(1)
+        for match in re.finditer(
+            r"(?im)^\s*-\s*\[?((?:C|S-C)-[0-9]{2,3})\b",
+            text,
+        )
+    }
+
+
+def _source_card_access(root: Path) -> dict[str, str]:
+    cards: dict[str, str] = {}
+    sources = root / "sources"
+    if not sources.is_dir():
+        return cards
+    for path in sorted(sources.glob("*.md")):
+        match = re.match(r"(S-[0-9]{2}[a-z]?)\b", path.name, re.IGNORECASE)
+        if match is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        access = re.search(
+            r"(?im)^\s*-\s*access level(?:,[^:\n]+)?\s*:\s*([^|\n]+)",
+            text,
+        )
+        cards[match.group(1).upper()] = access.group(1).strip().casefold() if access else ""
+    return cards
+
+
+def _claim_evidence_issues(
+    root: Path,
+    path: Path,
+    metadata: dict[str, object],
+    source_cards: dict[str, str],
+    checkpoint: str | None,
+) -> list[ValidationIssue]:
+    if checkpoint not in {"argument", "release", "submission"}:
+        return []
+    relative_path = _relative_path(root, path)
+    evidence = metadata.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return [
+            ValidationIssue(
+                "claim-evidence",
+                relative_path,
+                "evidence must be a non-empty list of source-card references",
+            )
+        ]
+    issues: list[ValidationIssue] = []
+    for entry in evidence:
+        if not isinstance(entry, str):
+            issues.append(
+                ValidationIssue(
+                    "claim-evidence",
+                    relative_path,
+                    "each evidence entry must be a source-card reference",
+                )
+            )
+            continue
+        ids = {value.upper() for value in SOURCE_ID.findall(entry)}
+        if not ids:
+            issues.append(
+                ValidationIssue(
+                    "claim-evidence",
+                    relative_path,
+                    f"evidence entry has no source-card ID: {entry}",
+                )
+            )
+            continue
+        for source_id in sorted(ids):
+            if source_id not in source_cards:
+                issues.append(
+                    ValidationIssue(
+                        "missing-source-card",
+                        relative_path,
+                        f"evidence references missing source card: {source_id}",
+                    )
+                )
+            elif metadata.get("state") == "supported" and not any(
+                level in source_cards[source_id]
+                for level in ("full text", "dataset", "primary material")
+            ):
+                issues.append(
+                    ValidationIssue(
+                        "unsupported-source-access",
+                        relative_path,
+                        f"supported claim relies on {source_id} without full-text access",
+                    )
+                )
+    return issues
+
+
+def _orphan_release_artifact_issues(
+    root: Path, checkpoint: str | None, release_id: str | None
+) -> list[ValidationIssue]:
+    if checkpoint not in {"release", "submission"}:
+        return []
+    referenced: set[Path] = set()
+    if release_id:
+        manifest = root / "releases" / release_id / "RELEASE.md"
+        if manifest.is_file():
+            try:
+                metadata, _ = parse_frontmatter(manifest)
+            except (OSError, UnicodeError, ValueError):
+                metadata = {}
+            for field in ("source_manuscript", "docx"):
+                value = metadata.get(field)
+                if isinstance(value, str) and value:
+                    referenced.add((root / value).resolve())
+    manuscript = root / "manuscript"
+    if not manuscript.is_dir():
+        return []
+    issues: list[ValidationIssue] = []
+    for path in sorted(manuscript.rglob("*")):
+        if not path.is_file() or path.suffix.casefold() not in {".pdf", ".docx", ".html"}:
+            continue
+        if path.resolve() in referenced:
+            continue
+        issues.append(
+            ValidationIssue(
+                "orphan-release-artifact",
+                _relative_path(root, path),
+                "release artifact is outside a release manifest",
+            )
+        )
+    return issues
+
+
+def _release_checkpoint_issues(root: Path, release_id: str | None) -> list[ValidationIssue]:
+    if not release_id:
+        return [ValidationIssue("release-manifest", "releases", "release id is required for release readiness")]
+    release_dir = root / "releases" / release_id
+    manifest = release_dir / "RELEASE.md"
+    if not manifest.is_file():
+        return [ValidationIssue("release-manifest", _relative_path(root, manifest), "release manifest is missing")]
+    try:
+        metadata, _ = parse_frontmatter(manifest)
+    except (OSError, UnicodeError, ValueError) as error:
+        return [ValidationIssue("release-manifest", _relative_path(root, manifest), str(error))]
+    issues: list[ValidationIssue] = []
+    source = metadata.get("source_manuscript")
+    source_path, source_issue = _release_artifact_path(root, source)
+    if source_issue == "release-manifest":
+        issues.append(ValidationIssue("release-manifest", _relative_path(root, manifest), "source_manuscript is required"))
+    elif source_issue is not None:
+        issues.append(ValidationIssue(source_issue, str(source), "source manuscript must be an existing regular file inside the project root"))
+    elif source_path is None:
+        issues.append(ValidationIssue("missing-path", source, "source manuscript is missing"))
+    docx = metadata.get("docx")
+    docx_path, docx_issue = _release_artifact_path(root, docx)
+    if docx_issue == "release-manifest":
+        issues.append(ValidationIssue("release-manifest", _relative_path(root, manifest), "docx is required for release inspection"))
+    elif docx_issue is not None:
+        issues.append(ValidationIssue(docx_issue, str(docx), "DOCX release artifact must be an existing regular file inside the project root"))
+    elif docx_path is None:
+        issues.append(ValidationIssue("missing-path", str(docx), "DOCX release artifact is missing"))
+    approval = release_dir / "APPROVAL.md"
+    if not approval.is_file():
+        issues.append(ValidationIssue("author-approval", _relative_path(root, release_dir / "APPROVAL.md"), "author approval is required for release"))
+    elif source_path is not None:
+        try:
+            approval_text = approval.read_text(encoding="utf-8")
+            author = re.search(r"(?im)^\s*-\s*author:\s*(\S.*)$", approval_text)
+            decision = re.search(r"(?im)^\s*-\s*decision:\s*(\S.*)$", approval_text)
+        except (OSError, UnicodeError):
+            author = None
+            decision = None
+        if author is None or not author.group(1).strip():
+            issues.append(ValidationIssue("author-approval", _relative_path(root, approval), "release approval must name an author"))
+        if decision is None or decision.group(1).strip().casefold() not in {"submit", "approve", "approved"}:
+            issues.append(ValidationIssue("author-approval", _relative_path(root, approval), "release approval decision must authorize submission"))
+        for label, artifact_path in (("artifact_sha256", source_path), ("docx_sha256", docx_path)):
+            if artifact_path is None:
+                continue
+            recorded = re.search(
+                rf"(?im)^\s*-\s*{label}:\s*([0-9a-f]{{64}})\s*$",
+                approval_text,
+            )
+            try:
+                current = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            except (OSError, UnicodeError):
+                current = ""
+            if recorded is None or recorded.group(1).casefold() != current:
+                issues.append(
+                    ValidationIssue(
+                        "stale-approval",
+                        _relative_path(root, approval),
+                        "release approval does not match the current release artifacts",
+                    )
+                )
+    return issues
+
+
+def _v2_semantic_issues(root: Path, checkpoint: str | None) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    claims_dir = root / "claims"
+    claim_paths = sorted(claims_dir.glob("C-*.md")) if claims_dir.is_dir() else []
+    index_ids = _claim_index_ids(root)
+    structured_ids: set[str] = set()
+    source_cards = _source_card_access(root)
+    if checkpoint in {"argument", "release", "submission"}:
+        if not claim_paths:
+            issues.append(
+                ValidationIssue(
+                    "claims-record",
+                    "claims",
+                    "argument and release checkpoints require structured claim records",
+                )
+            )
+        if index_ids and not claim_paths:
+            issues.append(
+                ValidationIssue(
+                    "claims-record",
+                    "CLAIMS.md",
+                    "legacy claims index contains entries without structured claim records",
+                )
+            )
+        if claim_paths and not index_ids:
+            issues.append(
+                ValidationIssue(
+                    "claims-index",
+                    "CLAIMS.md",
+                    "structured claim records must be listed in CLAIMS.md",
+                )
+            )
+    for path in claim_paths:
+        try:
+            metadata, body = parse_frontmatter(path)
+        except (OSError, UnicodeError, ValueError) as error:
+            issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), str(error)))
+            continue
+        claim_id = metadata.get("id")
+        if isinstance(claim_id, str):
+            structured_ids.add(claim_id)
+        required = ("id", "state", "risk", "scope", "evidence", "challenges", "confidence", "manuscript_targets", "review_status", "reopening_condition")
+        for field in required:
+            if field not in metadata:
+                issues.append(ValidationIssue("missing-field", _relative_path(root, path), f"missing claim field: {field}"))
+        if metadata.get("state") not in ALLOWED_CLAIM_STATES:
+            issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim state: {metadata.get('state')!r}"))
+        if metadata.get("risk") not in ALLOWED_RISKS:
+            issues.append(ValidationIssue("invalid-enum", _relative_path(root, path), f"unsupported claim risk: {metadata.get('risk')!r}"))
+        targets = metadata.get("manuscript_targets")
+        if "manuscript_targets" in metadata and not isinstance(targets, list):
+            issues.append(ValidationIssue("invalid-field", _relative_path(root, path), "manuscript_targets must be a list"))
+        if (
+            checkpoint in {"release", "submission"}
+            and metadata.get("state") in {"provisional", "disputed", "unverified"}
+            and isinstance(targets, list)
+            and targets
+        ):
+            issues.append(ValidationIssue("unresolved-manuscript-claim", _relative_path(root, path), "provisional, disputed, or unverified claim cannot target manuscript prose at release"))
+        issues.extend(_claim_evidence_issues(root, path, metadata, source_cards, checkpoint))
+        if not any(character.isalnum() for character in body):
+            issues.append(ValidationIssue("invalid-claim-record", _relative_path(root, path), "claim record must contain a substantive body"))
+    if index_ids and structured_ids:
+        for claim_id in sorted(index_ids):
+            if claim_id.startswith("C-") and claim_id not in structured_ids:
+                issues.append(
+                    ValidationIssue(
+                        "missing-claim-record",
+                        "CLAIMS.md",
+                        f"claims index entry has no structured record: {claim_id}",
+                    )
+                )
+    if checkpoint in {"argument", "release", "submission"}:
+        for path in sorted((root / "work-items").glob("rr-*.md")):
+            try:
+                metadata, _ = parse_frontmatter(path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if metadata.get("review_status") == "deferred" and metadata.get("risk") == "critical":
+                issues.append(ValidationIssue("critical-review-deferred", _relative_path(root, path), "critical work cannot be deferred"))
+            if checkpoint in {"release", "submission"} and metadata.get("review_status") == "deferred":
+                issues.append(ValidationIssue("review-debt", _relative_path(root, path), "deferred review must be resolved before release"))
+    return issues
+
+
+def _parallel_state_issues(root: Path) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    patterns = re.compile(r"(?i)^(?:CLAIMS|INQUIRY|DECISIONS|OUTLINE|ROUTE|HANDOFF)(?:\s*\d+|[ _-]*(?:copy|copia))\.md$")
+    for directory in (root, root / "manuscript"):
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.is_file() and patterns.fullmatch(path.name):
+                issues.append(
+                    ValidationIssue(
+                        "parallel-state",
+                        _relative_path(root, path),
+                        "parallel state file requires explicit resolution",
+                    )
+                )
+    return issues
+
+
+def _venue_checkpoint_issues(root: Path, submission: bool = False) -> list[ValidationIssue]:
+    venue_file = root / "VENUE.md"
+    target_present = False
+    if venue_file.is_file():
+        try:
+            metadata, body = parse_frontmatter(venue_file)
+            target_section, present = _section_content(body, "Target")
+            target_present = bool(metadata.get("target") or (present and _has_declared_text(target_section)))
+        except (OSError, UnicodeError, ValueError):
+            body = venue_file.read_text(encoding="utf-8")
+            target_section, present = _section_content(body, "Target")
+            target_present = bool(present and _has_declared_text(target_section))
+    articles = root / "venue" / "articles"
+    full_text_count = 0
+    if articles.is_dir():
+        for path in articles.glob("*.md"):
+            try:
+                metadata, _ = parse_frontmatter(path)
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if metadata.get("full_text") is True or str(metadata.get("access_level", "")).casefold() == "full text":
+                full_text_count += 1
+    if venue_file.is_file():
+        body = venue_file.read_text(encoding="utf-8")
+        match = re.search(r"(?im)full[- ]text(?:s)?\s*[:=]\s*(\d+)", body)
+        if match:
+            full_text_count = max(full_text_count, int(match.group(1)))
+    if not target_present:
+        return []
+    minimum = 10 if submission else 3
+    if full_text_count < minimum:
+        return [ValidationIssue("venue-threshold", "VENUE.md", f"venue fingerprint has {full_text_count} full texts; requires {minimum}")]
+    return []
+
+
+def _deferred_items(root: Path) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    for path in sorted((root / "work-items").glob("rr-*.md")):
+        try:
+            metadata, _ = parse_frontmatter(path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if metadata.get("review_status") == "deferred" or metadata.get("status") == "provisional":
+            metadata["path"] = _relative_path(root, path)
+            result.append(metadata)
+    return result
+
+
+def review_route(root: Path, stage: str) -> dict[str, object]:
+    if stage not in {"argument", "release"}:
+        raise ValueError("review stage must be argument or release")
+    items = _deferred_items(root)
+    critical = [item for item in items if item.get("risk") == "critical"]
+    blocking = [
+        item for item in items if item.get("risk") in {"material", "critical"}
+    ]
+    return {
+        "stage": stage,
+        "deferred_count": len(items),
+        "critical_count": len(critical),
+        "items": items,
+        "ready": not blocking if stage == "argument" else not items,
+    }
+
+
+def advance_work(
+    root: Path,
+    title: str,
+    item_type: str,
+    owner: str,
+    output: str,
+    review_later: bool = False,
+    risk: str | None = None,
+) -> Path:
+    if not owner:
+        raise ValueError("owner must not be empty")
+    normalized_output = _normalize_output_path(output)
+    try:
+        root_fd = os.open(root, DIRECTORY_FLAGS)
+    except OSError:
+        raise ValueError("research route root is missing") from None
+    try:
+        if not _output_is_regular_file(root_fd, normalized_output):
+            raise ValueError(
+                "output must resolve to an existing regular file inside the project root"
+            )
+    finally:
+        os.close(root_fd)
+    assigned_risk = _requested_risk(item_type, "light", risk)
+    if review_later and assigned_risk == "critical":
+        raise ValueError("critical work cannot be deferred")
+    item = new_work_item(root, title, item_type, "light", [], assigned_risk)
+    item_id, _ = parse_frontmatter(item)
+    item_id_value = item_id.get("id")
+    if not isinstance(item_id_value, str):
+        raise ValueError("new work item has no valid id")
+    claim_item(root, item_id_value, owner)
+    complete_item(
+        root,
+        item_id_value,
+        owner,
+        normalized_output,
+        verification=[] if review_later else [normalized_output],
+        result=None if review_later else f"Recorded output: {normalized_output}",
+        provisional=review_later,
+    )
+    scaffold_handoff(root)
+    return item
+
+
+def migrate_route(root: Path, apply: bool = False) -> dict[str, object]:
+    route = root / "ROUTE.md"
+    metadata, _ = parse_frontmatter(route)
+    source_version = _schema_version(metadata)
+    report: dict[str, object] = {"from": source_version, "to": 2, "apply": apply, "changes": []}
+    if source_version == 2:
+        report["changes"] = ["already-v2"]
+        return report
+    if source_version != 1:
+        raise ValueError(f"unsupported source schema: {source_version}")
+    changes = ["ROUTE.md schema_version: 1 -> 2", "add claims/ and releases/", "add v2 work-item risk and review_status"]
+    cycle = metadata.get("current_cycle")
+    if cycle in {"refine", "polish"}:
+        changes.append(f"current_cycle: {cycle} -> audit")
+    report["changes"] = changes
+    if not apply:
+        return report
+    backup_dir = root / ".research-route" / "migrations" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(route, backup_dir / "ROUTE.md")
+    handoff = root / "HANDOFF.md"
+    if handoff.is_file():
+        shutil.copy2(handoff, backup_dir / "HANDOFF.md")
+    (root / "claims").mkdir(exist_ok=True)
+    (root / "releases").mkdir(exist_ok=True)
+    metadata["schema_version"] = 2
+    if cycle in {"refine", "polish"}:
+        metadata["current_cycle"] = "audit"
+    route_body = parse_frontmatter(route)[1]
+    write_frontmatter(route, metadata, route_body)
+    for path in sorted((root / "work-items").glob("rr-*.md")):
+        item_metadata, body = parse_frontmatter(path)
+        shutil.copy2(path, backup_dir / path.name)
+        item_metadata["schema_version"] = 2
+        item_metadata.setdefault("risk", _risk_for_item(str(item_metadata.get("type", "question")), str(item_metadata.get("mode", "light"))))
+        item_metadata.setdefault("review_status", "none")
+        item_metadata.setdefault("acceptance", ["Record a defensible result and link its canonical output."])
+        item_metadata.setdefault("verification", [])
+        item_metadata.setdefault("result", None)
+        write_frontmatter(path, item_metadata, body)
+    if (root / "CLAIMS.md").is_file() and (root / "CLAIMS.md").read_text(encoding="utf-8").strip():
+        migration_note = root / "claims" / "MIGRATION-REVIEW.md"
+        migration_note.write_text(
+            "---\nschema_version: 2\nmigration_status: needs_review\n---\n\n# Claims migration\n\nReview legacy CLAIMS.md and create one structured claim record per substantive claim.\n",
+            encoding="utf-8",
+        )
+    try:
+        scaffold_handoff(root)
+        changes.append("regenerate HANDOFF.md")
+    except (OSError, UnicodeError, ValueError) as error:
+        report["handoff_warning"] = str(error)
+    return report
+
+
+def approve_release_record(
+    root: Path, release_id: str, kind: str, values: dict[str, str]
+) -> Path:
+    release_dir = root / "releases" / release_id
+    manifest = release_dir / "RELEASE.md"
+    if not manifest.is_file():
+        raise ValueError(f"release manifest is missing: {manifest}")
+    release_dir.mkdir(parents=True, exist_ok=True)
+    target = release_dir / ("EXCEPTIONS.md" if kind == "exceptions" else "APPROVAL.md")
+    lines = [f"# Release {kind.title()}", ""]
+    for key, value in values.items():
+        lines.append(f"- {key}: {value}")
+    try:
+        manifest_metadata, _ = parse_frontmatter(manifest)
+        for field, label in (("source_manuscript", "artifact_sha256"), ("docx", "docx_sha256")):
+            artifact_path, _ = _release_artifact_path(root, manifest_metadata.get(field))
+            if artifact_path is not None:
+                lines.append(
+                    f"- {label}: {hashlib.sha256(artifact_path.read_bytes()).hexdigest()}"
+                )
+    except (OSError, UnicodeError, ValueError):
+        pass
+    lines.append(f"- timestamp: {datetime.now(timezone.utc).isoformat()}")
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return target
+
+
+def validate_route(
+    root: Path, checkpoint: str | None = None, release_id: str | None = None
+) -> list[ValidationIssue]:
+    if checkpoint not in {
+        None,
+        "handoff",
+        "argument",
+        "research",
+        "venue",
+        "prose",
+        "release",
+        "submission",
+    }:
+        raise ValueError(f"unsupported validation checkpoint: {checkpoint}")
     try:
         root_fd = os.open(root, DIRECTORY_FLAGS)
     except OSError:
@@ -1101,9 +2130,9 @@ def validate_route(root: Path) -> list[ValidationIssue]:
     try:
         try:
             with _directory_at(root_fd, ".research-route", missing_ok=True) as state_fd:
-                return _validate_route_at(root, root_fd, state_fd)
+                return _validate_route_at(root, root_fd, state_fd, checkpoint, release_id)
         except ValueError:
-            issues = _validate_route_at(root, root_fd, None)
+            issues = _validate_route_at(root, root_fd, None, checkpoint, release_id)
             issues.append(
                 ValidationIssue(
                     "invalid-claim",
@@ -1119,14 +2148,18 @@ def validate_route(root: Path) -> list[ValidationIssue]:
 
 
 def _validate_route_at(
-    root: Path, root_fd: int, state_fd: int | None
+    root: Path,
+    root_fd: int,
+    state_fd: int | None,
+    checkpoint: str | None,
+    release_id: str | None = None,
 ) -> list[ValidationIssue]:
     try:
         work_items_fd = os.open("work-items", DIRECTORY_FLAGS, dir_fd=root_fd)
     except OSError:
-        return _validate_route_contents_at(root, root_fd, state_fd, None)
+        return _validate_route_contents_at(root, root_fd, state_fd, None, checkpoint, release_id)
     try:
-        return _validate_route_contents_at(root, root_fd, state_fd, work_items_fd)
+        return _validate_route_contents_at(root, root_fd, state_fd, work_items_fd, checkpoint, release_id)
     finally:
         os.close(work_items_fd)
 
@@ -1136,6 +2169,8 @@ def _validate_route_contents_at(
     root_fd: int,
     state_fd: int | None,
     work_items_fd: int | None,
+    checkpoint: str | None,
+    release_id: str | None = None,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
 
@@ -1158,6 +2193,21 @@ def _validate_route_contents_at(
                     "missing-path", relative_path, "required directory is missing"
                 )
             )
+
+    route_metadata_for_scope: dict[str, object] = {}
+    if stat.S_ISREG(_relative_kind_at(root_fd, "ROUTE.md") or 0):
+        try:
+            route_metadata_for_scope, _ = _parse_frontmatter_at(root_fd, "ROUTE.md")
+        except (OSError, UnicodeError, ValueError):
+            route_metadata_for_scope = {}
+    if _is_v2_root(route_metadata_for_scope):
+        for relative_path in ("claims", "releases"):
+            if not stat.S_ISDIR(_relative_kind_at(root_fd, relative_path) or 0):
+                issues.append(
+                    ValidationIssue(
+                        "missing-path", relative_path, "required v2 directory is missing"
+                    )
+                )
 
     route_path = Path("ROUTE.md")
     if stat.S_ISREG(_relative_kind_at(root_fd, "ROUTE.md") or 0):
@@ -1194,7 +2244,7 @@ def _validate_route_contents_at(
                         )
                     )
             schema_version = route_metadata.get("schema_version")
-            if schema_version != PROJECT_SCHEMA_VERSION:
+            if schema_version not in ALLOWED_SCHEMA_VERSIONS:
                 issues.append(
                     ValidationIssue(
                         "unsupported-schema",
@@ -1359,11 +2409,30 @@ def _validate_route_contents_at(
         handoff_issue = _handoff_freshness_issue(root_fd)
         if handoff_issue is not None:
             issues.append(handoff_issue)
+    privacy_issue = _privacy_issue(root_fd)
+    if privacy_issue is not None:
+        issues.append(privacy_issue)
+    if checkpoint == "handoff":
+        issues.extend(_handoff_checkpoint_issues(root_fd))
+    if _is_v2_root(route_metadata_for_scope):
+        issues.extend(_v2_semantic_issues(root, checkpoint))
+        issues.extend(_parallel_state_issues(root))
+    if checkpoint in {"prose", "release", "submission"}:
+        issues.extend(_prose_checkpoint_issues(root, release_id))
+    if checkpoint in {"venue", "submission"}:
+        issues.extend(_venue_checkpoint_issues(root, checkpoint == "submission"))
+    if checkpoint in {"release", "submission"}:
+        issues.extend(_orphan_release_artifact_issues(root, checkpoint, release_id))
+        issues.extend(_release_checkpoint_issues(root, release_id))
     _validate_markdown_links(root_fd, issues, work_items_fd)
     return sorted(issues, key=lambda issue: (issue.path, issue.code, issue.message))
 
 
-def init_route(destination: Path, title: str, language: str) -> Path:
+def init_route(
+    destination: Path, title: str, language: str, schema_version: int = PROJECT_SCHEMA_VERSION
+) -> Path:
+    if schema_version not in ALLOWED_SCHEMA_VERSIONS:
+        raise ValueError(f"unsupported schema version: {schema_version}")
     if destination.is_symlink() or destination.exists() and (
         not destination.is_dir() or any(destination.iterdir())
     ):
@@ -1381,6 +2450,7 @@ def init_route(destination: Path, title: str, language: str) -> Path:
         shutil.copytree(TEMPLATE_ROOT, staging, dirs_exist_ok=True)
         staged_route = staging / "ROUTE.md"
         metadata, body = parse_frontmatter(staged_route)
+        metadata["schema_version"] = schema_version
         metadata["project_title"] = title
         metadata["language"] = language
         write_frontmatter(staged_route, metadata, body)
@@ -1494,6 +2564,11 @@ def _scaffold_handoff_locked(root: Path, root_fd: int, state_fd: int) -> Path:
             for dependency in item["depends_on"]
         )
     ]
+    deferred_review = [
+        f"- {item.get('id')}: {item.get('title')} (risk: {item.get('risk', 'legacy')})"
+        for item in items
+        if item.get("review_status") == "deferred" or item.get("status") == "provisional"
+    ]
 
     generated_at = datetime.now(timezone.utc).isoformat()
     route_modified = datetime.fromtimestamp(
@@ -1533,6 +2608,8 @@ def _scaffold_handoff_locked(root: Path, root_fd: int, state_fd: int) -> Path:
         + ("\n".join(open_items) if open_items else "- None")
         + "\n\n### Active claims\n\n"
         + ("\n".join(active_claims) if active_claims else "- None")
+        + "\n\n### Deferred review\n\n"
+        + ("\n".join(deferred_review) if deferred_review else "- None")
         + "\n\n### Blocks\n\n"
         + (blocks if blocks else "- None")
         + "\n\n### Exact next action\n\n"
@@ -1567,51 +2644,20 @@ def scaffold_handoff(root: Path) -> Path:
     raise AssertionError("unreachable")
 
 
-def migrate_route(root: Path, target_version: int, apply: bool) -> MigrationPlan:
-    with _state_directory_fd(
-        root, create=apply, missing_ok=not apply
-    ) as (root_fd, state_fd):
-        _require_file_at(root_fd, root, "ROUTE.md")
-        metadata, _ = _parse_frontmatter_at(root_fd, "ROUTE.md")
-        current_version = metadata.get("schema_version")
-        if type(current_version) is not int:
-            raise ValueError("ROUTE.md schema_version must be an integer")
-        if current_version > PROJECT_SCHEMA_VERSION:
-            return MigrationPlan(
-                current_version,
-                target_version,
-                (f"unsupported current schema version {current_version}",),
-                False,
-            )
-        if target_version == current_version:
-            return MigrationPlan(current_version, target_version, (), True)
-        migration = MIGRATIONS.get((current_version, target_version))
-        if migration is None:
-            return MigrationPlan(
-                current_version,
-                target_version,
-                (
-                    f"no migration from schema version {current_version} "
-                    f"to {target_version}",
-                ),
-                False,
-            )
-        if apply:
-            assert state_fd is not None
-            with _claim_guard(state_fd):
-                changes = migration(root_fd, True)
-        else:
-            changes = migration(root_fd, False)
-    return MigrationPlan(current_version, target_version, changes, True)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="route.py")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{init,new,claim,release,complete,advance,review,validate,handoff}",
+    )
     init_parser = commands.add_parser("init")
     init_parser.add_argument("destination", type=Path)
     init_parser.add_argument("--title", required=True)
     init_parser.add_argument("--language", required=True)
+    init_parser.add_argument(
+        "--schema-version", type=int, choices=sorted(ALLOWED_SCHEMA_VERSIONS), default=LEGACY_SCHEMA_VERSION
+    )
     new_parser = commands.add_parser("new")
     new_parser.add_argument("--root", type=Path, required=True)
     new_parser.add_argument("--title", required=True)
@@ -1623,6 +2669,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     new_parser.add_argument("--mode", choices=sorted(ALLOWED_MODES), required=True)
     new_parser.add_argument("--depends-on", action="append", default=[])
+    new_parser.add_argument("--risk", choices=sorted(ALLOWED_RISKS))
     claim_parser = commands.add_parser("claim")
     claim_parser.add_argument("item_id")
     claim_parser.add_argument("--root", type=Path, required=True)
@@ -1632,15 +2679,65 @@ def _build_parser() -> argparse.ArgumentParser:
     release_parser.add_argument("--root", type=Path, required=True)
     release_parser.add_argument("--owner", required=True)
     release_parser.add_argument("--force", action="store_true")
-    validate_parser = commands.add_parser("validate")
+    complete_parser = commands.add_parser(
+        "complete", help="close an owned work item and persist its output"
+    )
+    complete_parser.add_argument("item_id")
+    complete_parser.add_argument("--root", type=Path, required=True)
+    complete_parser.add_argument("--owner", required=True)
+    complete_parser.add_argument("--output", required=True)
+    complete_parser.add_argument("--provisional", action="store_true")
+    complete_parser.add_argument("--verification", action="append", default=[])
+    complete_parser.add_argument("--result")
+    advance_parser = commands.add_parser(
+        "advance", help="record a compact result through the adaptive route"
+    )
+    advance_parser.add_argument("--root", type=Path, required=True)
+    advance_parser.add_argument("--title", required=True)
+    advance_parser.add_argument(
+        "--type", dest="item_type", choices=sorted(ALLOWED_ITEM_TYPES), required=True
+    )
+    advance_parser.add_argument("--owner", required=True)
+    advance_parser.add_argument("--output", required=True)
+    advance_parser.add_argument("--review-later", action="store_true")
+    advance_parser.add_argument("--risk", choices=sorted(ALLOWED_RISKS))
+    review_parser = commands.add_parser("review", help="report grouped review debt")
+    review_parser.add_argument("--root", type=Path, required=True)
+    review_parser.add_argument("--stage", choices=("argument", "release"), required=True)
+    migrate_parser = commands.add_parser("migrate", help=argparse.SUPPRESS)
+    migrate_parser.add_argument("--root", type=Path, required=True)
+    migrate_parser.add_argument("--to", type=int, choices=(2,), required=True)
+    migrate_parser.add_argument("--dry-run", action="store_true")
+    migrate_parser.add_argument("--apply", action="store_true")
+    exception_parser = commands.add_parser("approve-exception")
+    exception_parser.add_argument("--root", type=Path, required=True)
+    exception_parser.add_argument("--release", required=True)
+    exception_parser.add_argument("--finding", required=True)
+    exception_parser.add_argument("--author", required=True)
+    exception_parser.add_argument("--rationale", required=True)
+    approval_parser = commands.add_parser("approve-release")
+    approval_parser.add_argument("--root", type=Path, required=True)
+    approval_parser.add_argument("--release", required=True)
+    approval_parser.add_argument("--author", required=True)
+    approval_parser.add_argument("--decision", required=True)
+    validate_parser = commands.add_parser(
+        "validate", help="check structural integrity; use --checkpoint handoff for transfer readiness"
+    )
     validate_parser.add_argument("--root", type=Path, required=True)
     validate_parser.add_argument("--json", action="store_true")
+    validate_parser.add_argument(
+        "--checkpoint",
+        choices=("handoff", "argument", "research", "venue", "prose", "release", "submission"),
+        help="run a focused deterministic readiness check",
+    )
+    validate_parser.add_argument("--release", dest="release_id")
     handoff_parser = commands.add_parser("handoff")
     handoff_parser.add_argument("--root", type=Path, required=True)
-    migrate_parser = commands.add_parser("migrate")
-    migrate_parser.add_argument("--root", type=Path, required=True)
-    migrate_parser.add_argument("--to", type=int, required=True, dest="target_version")
-    migrate_parser.add_argument("--apply", action="store_true")
+    # Keep the compatibility migration command callable without advertising it
+    # in the v1 help contract.
+    commands._choices_actions = [
+        action for action in commands._choices_actions if action.dest != "migrate"
+    ]
     return parser
 
 
@@ -1648,7 +2745,12 @@ def main(argv: list[str] | None = None) -> int:
     arguments = _build_parser().parse_args(argv)
     try:
         if arguments.command == "init":
-            init_route(arguments.destination, arguments.title, arguments.language)
+            init_route(
+                arguments.destination,
+                arguments.title,
+                arguments.language,
+                arguments.schema_version,
+            )
         elif arguments.command == "new":
             new_work_item(
                 arguments.root,
@@ -1656,6 +2758,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.item_type,
                 arguments.mode,
                 arguments.depends_on,
+                arguments.risk,
             )
         elif arguments.command == "claim":
             claim_item(arguments.root, arguments.item_id, arguments.owner)
@@ -1668,8 +2771,107 @@ def main(argv: list[str] | None = None) -> int:
                     f"warning: forcibly released claim for {arguments.item_id}",
                     file=sys.stderr,
                 )
+        elif arguments.command == "complete":
+            if arguments.provisional:
+                item_files = sorted((arguments.root / "work-items").glob(f"{arguments.item_id}-*.md"))
+                if len(item_files) != 1:
+                    raise ValueError(f"work item is ambiguous or missing: {arguments.item_id}")
+                item_metadata, _ = parse_frontmatter(item_files[0])
+                if item_metadata.get("risk") == "critical":
+                    raise ValueError("critical work cannot be deferred")
+            complete_item(
+                arguments.root,
+                arguments.item_id,
+                arguments.owner,
+                arguments.output,
+                arguments.verification,
+                arguments.result,
+                arguments.provisional,
+            )
+            if arguments.provisional:
+                item_files = sorted((arguments.root / "work-items").glob(f"{arguments.item_id}-*.md"))
+                if len(item_files) != 1:
+                    raise ValueError(f"work item is ambiguous or missing: {arguments.item_id}")
+                item_file = item_files[0]
+                metadata, body = parse_frontmatter(item_file)
+                metadata["status"] = "provisional"
+                if metadata.get("schema_version") == 2:
+                    metadata["review_status"] = "deferred"
+                write_frontmatter(item_file, metadata, body)
+            elif arguments.verification or arguments.result is not None:
+                item_files = sorted((arguments.root / "work-items").glob(f"{arguments.item_id}-*.md"))
+                if len(item_files) != 1:
+                    raise ValueError(f"work item is ambiguous or missing: {arguments.item_id}")
+                item_file = item_files[0]
+                metadata, body = parse_frontmatter(item_file)
+                if metadata.get("schema_version") == 2:
+                    metadata["verification"] = arguments.verification
+                    metadata["result"] = arguments.result
+                    metadata["review_status"] = "reviewed"
+                    write_frontmatter(item_file, metadata, body)
+        elif arguments.command == "advance":
+            advance_work(
+                arguments.root,
+                arguments.title,
+                arguments.item_type,
+                arguments.owner,
+                arguments.output,
+                arguments.review_later,
+                arguments.risk,
+            )
+        elif arguments.command == "review":
+            print(json.dumps(review_route(arguments.root, arguments.stage), ensure_ascii=False))
+        elif arguments.command == "migrate":
+            if arguments.dry_run == arguments.apply:
+                raise ValueError("choose exactly one of --dry-run or --apply")
+            marker = arguments.root / ".research-route" / "migration-v2-dry-run.json"
+            if arguments.dry_run:
+                report = migrate_route(arguments.root, False)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(
+                    json.dumps(
+                        {
+                            "route_sha256": hashlib.sha256(
+                                (arguments.root / "ROUTE.md").read_bytes()
+                            ).hexdigest(),
+                            "report": report,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                if not marker.is_file():
+                    raise ValueError("run migrate --dry-run before --apply")
+                try:
+                    marker_data = json.loads(marker.read_text(encoding="utf-8"))
+                    current_hash = hashlib.sha256(
+                        (arguments.root / "ROUTE.md").read_bytes()
+                    ).hexdigest()
+                except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+                    raise ValueError(f"invalid migration dry-run marker: {error}") from None
+                if marker_data.get("route_sha256") != current_hash:
+                    raise ValueError("ROUTE.md changed after migration dry-run; rerun --dry-run")
+                report = migrate_route(arguments.root, True)
+                marker.unlink()
+            print(json.dumps(report, ensure_ascii=False))
+        elif arguments.command == "approve-exception":
+            approve_release_record(
+                arguments.root,
+                arguments.release,
+                "exceptions",
+                {"finding": arguments.finding, "author": arguments.author, "rationale": arguments.rationale},
+            )
+        elif arguments.command == "approve-release":
+            approve_release_record(
+                arguments.root,
+                arguments.release,
+                "approval",
+                {"author": arguments.author, "decision": arguments.decision},
+            )
         elif arguments.command == "validate":
-            issues = validate_route(arguments.root)
+            issues = validate_route(arguments.root, arguments.checkpoint, arguments.release_id)
             if arguments.json:
                 print(json.dumps([asdict(issue) for issue in issues], ensure_ascii=False))
             else:
@@ -1678,20 +2880,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1 if issues else 0
         elif arguments.command == "handoff":
             scaffold_handoff(arguments.root)
-        elif arguments.command == "migrate":
-            plan = migrate_route(
-                arguments.root, arguments.target_version, arguments.apply
-            )
-            if arguments.apply and not plan.applicable:
-                print("error: refusing to apply unknown migration", file=sys.stderr)
-            if plan.current_version == plan.target_version:
-                print(f"already at schema version {plan.current_version}")
-            else:
-                if plan.applicable and not arguments.apply:
-                    print("dry run; no files modified")
-                for change in plan.changes:
-                    print(change)
-            return 0 if plan.applicable else 1
     except (FileExistsError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

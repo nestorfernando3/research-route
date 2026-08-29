@@ -1,5 +1,5 @@
 ---
-schema_version: 1
+schema_version: 2
 project_title: "Untitled research project"
 language: "undetermined"
 current_cycle: "discover"
