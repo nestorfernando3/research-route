@@ -1,5 +1,7 @@
 # Research Route Slim Improvements — Design Specification
 
+> Status: superseded by the schema-v2 implementation documented in `README.md`, `CHANGELOG.md`, and `research-route/SKILL.md`. This file is retained as the v1 design baseline and historical provenance.
+
 ## Purpose
 
 Make Research Route Slim operationally complete, safer by default, and precise about what its tooling validates without expanding its scholarly workflow or adding dependencies.

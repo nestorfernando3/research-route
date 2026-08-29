@@ -15,7 +15,9 @@ All notable changes to this project are documented here.
 - Required structured claim records at argument and release checkpoints, reconciled `CLAIMS.md` with `claims/`, and linked claim evidence to existing source cards.
 - Blocked unresolved manuscript-targeted claims and orphan PDF, DOCX, and HTML artifacts at release.
 - Checked release scaffolding and declared word counts against the artifact.
-- Added seven regression tests for claim reconciliation, source access, unresolved claims, orphan artifacts, release scaffolding, and word counts; the suite now passes 108 tests.
+- Bound release approval to current source-manuscript and DOCX hashes, and kept material review debt blocking the argument review.
+- Made failed `advance` calls validate their output before creating work state.
+- Added regression tests for stale approval, unsafe release paths, deferred material work, partial `advance` state, and file-backed handoff replay; the suite now passes 114 tests.
 
 ## [Research Route Slim — 2026-08-08]
 

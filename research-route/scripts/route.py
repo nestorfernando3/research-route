@@ -1532,6 +1532,27 @@ def _word_count_findings(path: Path, text: str) -> list[ValidationIssue]:
     ]
 
 
+def _release_artifact_path(
+    root: Path, value: object
+) -> tuple[Path | None, str | None]:
+    if not isinstance(value, str) or not value:
+        return None, "release-manifest"
+    try:
+        normalized = _normalize_output_path(value)
+    except ValueError:
+        return None, "invalid-path"
+    try:
+        root_fd = os.open(root, DIRECTORY_FLAGS)
+    except OSError:
+        return None, "missing-path"
+    try:
+        if not _output_is_regular_file(root_fd, normalized):
+            return None, "missing-path"
+    finally:
+        os.close(root_fd)
+    return root / normalized, None
+
+
 def _release_paths(root: Path, release_id: str | None) -> list[Path]:
     if release_id:
         manifest = root / "releases" / release_id / "RELEASE.md"
@@ -1544,8 +1565,9 @@ def _release_paths(root: Path, release_id: str | None) -> list[Path]:
         paths: list[Path] = []
         for field in ("source_manuscript", "docx"):
             value = metadata.get(field)
-            if isinstance(value, str) and value:
-                paths.append(root / value)
+            path, _ = _release_artifact_path(root, value)
+            if path is not None:
+                paths.append(path)
         return paths
     return sorted(
         path for path in (root / "manuscript").rglob("*")
@@ -1741,17 +1763,55 @@ def _release_checkpoint_issues(root: Path, release_id: str | None) -> list[Valid
         return [ValidationIssue("release-manifest", _relative_path(root, manifest), str(error))]
     issues: list[ValidationIssue] = []
     source = metadata.get("source_manuscript")
-    if not isinstance(source, str) or not source:
+    source_path, source_issue = _release_artifact_path(root, source)
+    if source_issue == "release-manifest":
         issues.append(ValidationIssue("release-manifest", _relative_path(root, manifest), "source_manuscript is required"))
-    elif not (root / source).is_file():
+    elif source_issue is not None:
+        issues.append(ValidationIssue(source_issue, str(source), "source manuscript must be an existing regular file inside the project root"))
+    elif source_path is None:
         issues.append(ValidationIssue("missing-path", source, "source manuscript is missing"))
     docx = metadata.get("docx")
-    if not isinstance(docx, str) or not docx:
+    docx_path, docx_issue = _release_artifact_path(root, docx)
+    if docx_issue == "release-manifest":
         issues.append(ValidationIssue("release-manifest", _relative_path(root, manifest), "docx is required for release inspection"))
-    elif not (root / docx).is_file():
-        issues.append(ValidationIssue("missing-path", docx, "DOCX release artifact is missing"))
-    if not (release_dir / "APPROVAL.md").is_file():
+    elif docx_issue is not None:
+        issues.append(ValidationIssue(docx_issue, str(docx), "DOCX release artifact must be an existing regular file inside the project root"))
+    elif docx_path is None:
+        issues.append(ValidationIssue("missing-path", str(docx), "DOCX release artifact is missing"))
+    approval = release_dir / "APPROVAL.md"
+    if not approval.is_file():
         issues.append(ValidationIssue("author-approval", _relative_path(root, release_dir / "APPROVAL.md"), "author approval is required for release"))
+    elif source_path is not None:
+        try:
+            approval_text = approval.read_text(encoding="utf-8")
+            author = re.search(r"(?im)^\s*-\s*author:\s*(\S.*)$", approval_text)
+            decision = re.search(r"(?im)^\s*-\s*decision:\s*(\S.*)$", approval_text)
+        except (OSError, UnicodeError):
+            author = None
+            decision = None
+        if author is None or not author.group(1).strip():
+            issues.append(ValidationIssue("author-approval", _relative_path(root, approval), "release approval must name an author"))
+        if decision is None or decision.group(1).strip().casefold() not in {"submit", "approve", "approved"}:
+            issues.append(ValidationIssue("author-approval", _relative_path(root, approval), "release approval decision must authorize submission"))
+        for label, artifact_path in (("artifact_sha256", source_path), ("docx_sha256", docx_path)):
+            if artifact_path is None:
+                continue
+            recorded = re.search(
+                rf"(?im)^\s*-\s*{label}:\s*([0-9a-f]{{64}})\s*$",
+                approval_text,
+            )
+            try:
+                current = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            except (OSError, UnicodeError):
+                current = ""
+            if recorded is None or recorded.group(1).casefold() != current:
+                issues.append(
+                    ValidationIssue(
+                        "stale-approval",
+                        _relative_path(root, approval),
+                        "release approval does not match the current release artifacts",
+                    )
+                )
     return issues
 
 
@@ -1911,12 +1971,15 @@ def review_route(root: Path, stage: str) -> dict[str, object]:
         raise ValueError("review stage must be argument or release")
     items = _deferred_items(root)
     critical = [item for item in items if item.get("risk") == "critical"]
+    blocking = [
+        item for item in items if item.get("risk") in {"material", "critical"}
+    ]
     return {
         "stage": stage,
         "deferred_count": len(items),
         "critical_count": len(critical),
         "items": items,
-        "ready": not critical if stage == "argument" else not items,
+        "ready": not blocking if stage == "argument" else not items,
     }
 
 
@@ -1931,7 +1994,18 @@ def advance_work(
 ) -> Path:
     if not owner:
         raise ValueError("owner must not be empty")
-    route_metadata, _ = parse_frontmatter(root / "ROUTE.md")
+    normalized_output = _normalize_output_path(output)
+    try:
+        root_fd = os.open(root, DIRECTORY_FLAGS)
+    except OSError:
+        raise ValueError("research route root is missing") from None
+    try:
+        if not _output_is_regular_file(root_fd, normalized_output):
+            raise ValueError(
+                "output must resolve to an existing regular file inside the project root"
+            )
+    finally:
+        os.close(root_fd)
     assigned_risk = _requested_risk(item_type, "light", risk)
     if review_later and assigned_risk == "critical":
         raise ValueError("critical work cannot be deferred")
@@ -1945,9 +2019,9 @@ def advance_work(
         root,
         item_id_value,
         owner,
-        output,
-        verification=[] if review_later else [output],
-        result=None if review_later else f"Recorded output: {output}",
+        normalized_output,
+        verification=[] if review_later else [normalized_output],
+        result=None if review_later else f"Recorded output: {normalized_output}",
         provisional=review_later,
     )
     scaffold_handoff(root)
@@ -2022,11 +2096,12 @@ def approve_release_record(
         lines.append(f"- {key}: {value}")
     try:
         manifest_metadata, _ = parse_frontmatter(manifest)
-        source = manifest_metadata.get("source_manuscript")
-        if isinstance(source, str) and (root / source).is_file():
-            lines.append(
-                f"- artifact_sha256: {hashlib.sha256((root / source).read_bytes()).hexdigest()}"
-            )
+        for field, label in (("source_manuscript", "artifact_sha256"), ("docx", "docx_sha256")):
+            artifact_path, _ = _release_artifact_path(root, manifest_metadata.get(field))
+            if artifact_path is not None:
+                lines.append(
+                    f"- {label}: {hashlib.sha256(artifact_path.read_bytes()).hexdigest()}"
+                )
     except (OSError, UnicodeError, ValueError):
         pass
     lines.append(f"- timestamp: {datetime.now(timezone.utc).isoformat()}")

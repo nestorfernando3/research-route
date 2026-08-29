@@ -44,13 +44,13 @@ The goal is not just speed. The goal is a paper that can actually be defended: o
 - A small standard-library Python CLI for the mechanical parts of project state.
 - Adaptive risk levels that keep critical verification immediate and batch material review into argument and release passes.
 
-The CLI supports the detailed lifecycle `new`, `claim`, `complete`, and `release`, plus the compact `advance` path for routine work. Structural validation checks file shape and consistency only. Focused checkpoints cover argument, research, prose, venue, handoff, release, and submission; only submission composes scholarly gates and exact-version approval.
+The CLI supports the detailed lifecycle `new`, `claim`, `complete`, and `release`, plus the compact `advance` path for routine work. Validation is deterministic: it checks file shape, consistency, claims, prose, venue, release artifacts, and approval records. Focused checkpoints cover argument, research, prose, venue, handoff, release, and submission; ethics, bibliography, reviewer judgment, and final author approval remain human gates.
 
 New projects should initialize with `--schema-version 2`. The default `init` mode remains schema v1 for compatibility with older automation; migrate legacy roots explicitly after a dry run.
 
 ## Installation
 
-Clone the slim publication branch once into a stable local directory, then link the full `research-route/` folder into the skill path for each harness.
+Clone the slim publication branch once into a stable local directory, then link the full `research-route/` folder into the skill path for each harness. Run the clone block first, even if you will only use the Claude Code or OpenCode link:
 
 ### Codex
 
@@ -58,24 +58,30 @@ Clone the slim publication branch once into a stable local directory, then link 
 mkdir -p ~/.local/share
 git clone --branch codex/research-route-slim https://github.com/nestorfernando3/research-route.git ~/.local/share/research-route-slim
 mkdir -p ~/.codex/skills
-test ! -e ~/.codex/skills/research-route-slim && ln -s ~/.local/share/research-route-slim/research-route ~/.codex/skills/research-route-slim
+if [ ! -e ~/.codex/skills/research-route-slim ] && [ ! -L ~/.codex/skills/research-route-slim ]; then ln -s ~/.local/share/research-route-slim/research-route ~/.codex/skills/research-route-slim; fi
 ```
 
 ### Claude Code
 
 ```bash
 mkdir -p ~/.claude/skills
-test ! -e ~/.claude/skills/research-route-slim && ln -s ~/.local/share/research-route-slim/research-route ~/.claude/skills/research-route-slim
+if [ ! -e ~/.claude/skills/research-route-slim ] && [ ! -L ~/.claude/skills/research-route-slim ]; then ln -s ~/.local/share/research-route-slim/research-route ~/.claude/skills/research-route-slim; fi
 ```
 
 ### OpenCode
 
 ```bash
 mkdir -p ~/.config/opencode/skills
-test ! -e ~/.config/opencode/skills/research-route-slim && ln -s ~/.local/share/research-route-slim/research-route ~/.config/opencode/skills/research-route-slim
+if [ ! -e ~/.config/opencode/skills/research-route-slim ] && [ ! -L ~/.config/opencode/skills/research-route-slim ]; then ln -s ~/.local/share/research-route-slim/research-route ~/.config/opencode/skills/research-route-slim; fi
 ```
 
 If you already installed the skill for Claude Code, OpenCode can also discover Claude-compatible skill locations in many setups, so you may not need a second copy.
+
+Create release approval with the CLI so it records hashes for the current source manuscript and DOCX; editing either artifact requires a new approval:
+
+```bash
+python3 <skill-dir>/scripts/route.py approve-release --root <root> --release <id> --author "<author>" --decision submit
+```
 
 ### One-Prompt Install for Any Agent
 
@@ -89,7 +95,7 @@ The slim prompt was checked with three critical safety sentinels covering inacce
 
 At the time of writing:
 
-- prompt size: below `800 words`
+- prompt size: `800 words` or fewer
 - sentinel median: `17 / 20`
 - critical failures: `0`
 - selected six-scenario benchmark evidence is recorded in `evaluations/RESULTS.md`; it is not a superiority claim

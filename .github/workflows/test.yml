@@ -13,4 +13,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m unittest discover -s tests
+      - run: python -m py_compile research-route/scripts/route.py
+      - run: test "$(wc -w < research-route/SKILL.md)" -le 800
       - run: python research-route/scripts/route.py --help

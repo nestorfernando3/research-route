@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -33,6 +34,15 @@ class RouteV2Tests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def write_docx(self, path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        document = (
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            f"<w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>"
+        )
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("word/document.xml", document)
 
     def init(self, version: str = "2") -> None:
         result = self.cli(
@@ -186,13 +196,20 @@ class RouteV2Tests(unittest.TestCase):
         )
         manuscript = self.root / "manuscript" / "draft.md"
         manuscript.write_text("An academic sentence with evidence.\n", encoding="utf-8")
+        docx = self.root / "manuscript" / "draft.docx"
+        self.write_docx(docx, "An academic sentence with evidence.")
         release = self.root / "releases" / "r1"
         release.mkdir(parents=True)
         (release / "RELEASE.md").write_text(
-            '---\nsource_manuscript: "manuscript/draft.md"\ndocx: "manuscript/draft.md"\n---\n',
+            '---\nsource_manuscript: "manuscript/draft.md"\ndocx: "manuscript/draft.docx"\n---\n',
             encoding="utf-8",
         )
-        (release / "APPROVAL.md").write_text("Approved.\n", encoding="utf-8")
+        ROUTE.approve_release_record(
+            self.root,
+            "r1",
+            "approval",
+            {"author": "author", "decision": "submit"},
+        )
 
         issues = ROUTE.validate_route(self.root, "submission", "r1")
 
@@ -303,6 +320,174 @@ class RouteV2Tests(unittest.TestCase):
         report = ROUTE.review_route(self.root, "argument")
         self.assertEqual(report["stage"], "argument")
         self.assertEqual(report["deferred_count"], 1)
+        self.assertFalse(report["ready"])
+
+    def test_advance_rejects_missing_output_without_partial_state(self) -> None:
+        self.init()
+        result = self.cli(
+            "advance",
+            "--root",
+            str(self.root),
+            "--title",
+            "Missing output",
+            "--type",
+            "question",
+            "--owner",
+            "agent-a",
+            "--output",
+            "missing.md",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            list((self.root / "work-items").glob("rr-*.md")), []
+        )
+        self.assertEqual(
+            list((self.root / ".research-route" / "claims").glob("*.lock")), []
+        )
+
+    def test_release_checkpoint_rejects_stale_release_approval(self) -> None:
+        self.init()
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text(
+            "This manuscript contains a complete academic sentence for review.\n",
+            encoding="utf-8",
+        )
+        docx = self.root / "manuscript" / "draft.docx"
+        self.write_docx(docx, "This manuscript contains a complete academic sentence for review.")
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\n'
+            'docx: "manuscript/draft.docx"\n---\n',
+            encoding="utf-8",
+        )
+        ROUTE.approve_release_record(
+            self.root,
+            "r1",
+            "approval",
+            {"author": "author", "decision": "submit"},
+        )
+        manuscript.write_text(
+            "This manuscript was changed after the approval was recorded.\n",
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "release", "r1")
+
+        self.assertTrue(any(issue.code == "stale-approval" for issue in issues))
+
+    def test_release_checkpoint_rejects_manifest_path_escape(self) -> None:
+        self.init()
+        outside = self.root.parent / "outside.md"
+        outside.write_text("An external manuscript.\n", encoding="utf-8")
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "../outside.md"\n'
+            'docx: "../outside.md"\n---\n',
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "release", "r1")
+
+        self.assertTrue(any(issue.code == "invalid-path" for issue in issues))
+
+    def test_release_checkpoint_rejects_manifest_symlink(self) -> None:
+        self.init()
+        outside = self.root.parent / "outside.md"
+        outside.write_text("An external manuscript.\n", encoding="utf-8")
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.symlink_to(outside)
+        docx = self.root / "manuscript" / "draft.docx"
+        self.write_docx(docx, "An academic sentence.")
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\n'
+            'docx: "manuscript/draft.docx"\n---\n',
+            encoding="utf-8",
+        )
+
+        issues = ROUTE.validate_route(self.root, "release", "r1")
+
+        self.assertTrue(any(issue.code == "missing-path" for issue in issues))
+
+    def test_release_checkpoint_requires_authorizing_decision(self) -> None:
+        self.init()
+        manuscript = self.root / "manuscript" / "draft.md"
+        manuscript.write_text("An academic sentence.\n", encoding="utf-8")
+        docx = self.root / "manuscript" / "draft.docx"
+        self.write_docx(docx, "An academic sentence.")
+        release = self.root / "releases" / "r1"
+        release.mkdir(parents=True)
+        (release / "RELEASE.md").write_text(
+            '---\nsource_manuscript: "manuscript/draft.md"\n'
+            'docx: "manuscript/draft.docx"\n---\n',
+            encoding="utf-8",
+        )
+        ROUTE.approve_release_record(
+            self.root,
+            "r1",
+            "approval",
+            {"author": "author", "decision": "reject"},
+        )
+
+        issues = ROUTE.validate_route(self.root, "release", "r1")
+
+        self.assertTrue(any(issue.code == "author-approval" for issue in issues))
+
+    def test_file_backed_route_replay_validates_handoff(self) -> None:
+        self.init()
+        route = self.root / "ROUTE.md"
+        metadata, body = ROUTE.parse_frontmatter(route)
+        body = body.replace(
+            "## Destination\n",
+            "## Destination\nA durable paper project.\n\n",
+        ).replace(
+            "## Exact next action\n",
+            "## Exact next action\nReview the completed source map.\n\n",
+        )
+        ROUTE.write_frontmatter(route, metadata, body)
+
+        output = self.root / "notes" / "source-map.md"
+        output.parent.mkdir()
+        output.write_text(
+            "The source map records the relevant evidence and limits.\n",
+            encoding="utf-8",
+        )
+        item = ROUTE.new_work_item(
+            self.root, "Map sources", "source", "light", []
+        )
+        item_metadata, _ = ROUTE.parse_frontmatter(item)
+        item_id = item_metadata["id"]
+        ROUTE.claim_item(self.root, item_id, "agent-a")
+        ROUTE.complete_item(
+            self.root,
+            item_id,
+            "agent-a",
+            "notes/source-map.md",
+            verification=["notes/source-map.md"],
+            result="Source map completed",
+        )
+
+        ROUTE.scaffold_handoff(self.root)
+        handoff = self.root / "HANDOFF.md"
+        handoff_text = handoff.read_text(encoding="utf-8")
+        for heading, content in (
+            ("## Intellectual change", "The source map is complete."),
+            ("## Invalidated assumptions", "- None"),
+            ("## Live contradiction", "- None"),
+            ("## Researcher decisions needed", "- None"),
+            ("## Exact next action and why", "Review the completed source map."),
+        ):
+            handoff_text = handoff_text.replace(
+                heading + "\n", heading + "\n" + content + "\n\n"
+            )
+        handoff.write_text(handoff_text, encoding="utf-8")
+        ROUTE.scaffold_handoff(self.root)
+
+        self.assertEqual(ROUTE.validate_route(self.root, "handoff"), [])
 
     def test_migration_dry_run_does_not_mutate_v1_root(self) -> None:
         self.init("1")
